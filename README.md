@@ -1,8 +1,12 @@
 # Side Screen Panel · 副屏看板
 
-面向 Windows 双屏笔记本和横向副屏的桌面看板。在副屏常驻硬件占用、网络速率、Codex 额度和 Agent 会话状态。适用于 ASUS ScreenPad Plus 一类的内置副屏，也可用在扩展桌面模式下的外接显示器。
+专为键盘上方带横向副屏的 Windows 双屏笔记本设计，例如搭载 ScreenPad Plus 的 ASUS Zenbook Duo 14。主屏继续用来工作，副屏常驻硬件占用、网络速率、Codex 额度和 Agent 会话状态。也支持扩展桌面模式下的外接副屏。[ASUS 机型示例](https://www.asus.com/laptops/for-creators/zenbook/zenbook-duo-14-ux482/)
 
 [下载 Windows x64 版](https://github.com/rhouselyn/side-screen-panel/releases/latest/download/Side-Screen-Panel-windows-x64.zip) · [查看更新记录](https://github.com/rhouselyn/side-screen-panel/releases)
+
+![双屏笔记本使用效果图，主屏显示桌面，键盘上方的横向副屏运行 Side Screen Panel](docs/images/dual-screen-laptop.png)
+
+*双屏笔记本使用效果图，由 AI 生成，副屏参考下方的 Pro 看板预览。*
 
 ## 快速开始
 
