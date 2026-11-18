@@ -1,0 +1,7 @@
+PyQt5>=5.15,<6
+PyQtWebEngine>=5.15,<6
+psutil
+pywin32
+PyYAML
+requests
+websocket-client

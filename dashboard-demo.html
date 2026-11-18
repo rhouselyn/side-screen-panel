@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>副屏看板 · 静态设计原型</title>
+<!-- 本机副屏看板。?review=1 启用模拟会话查看。 -->
+<style>
+  :root {
+    --base: #171e25;
+    --ink: #edf4fa;
+    --muted: #a1afbc;
+    --line: #38444e;
+    --ice: #9fcee5;
+    --mint: #a1d8c4;
+    --amber: #e6c38a;
+    --blue: #7fb4ff;
+    font: min(.694444vw, 2.314815vh) / 1.25 "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+    color: var(--ink);
+    background: #0d1217;
+  }
+  * { box-sizing: border-box; }
+  html, body { overflow: hidden; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+  /* 四列：硬件（通栏）/ 网络（通栏）/ 额度列 / 会话列；右列内部再 2:1 */
+  .panel {
+    width: min(100vw, 333.333333vh);
+    height: min(30vw, 100vh);
+    position: relative;
+    display: grid;
+    grid-template:
+      "hardware network quota   right" minmax(0, 2fr)
+      "hardware network deepseek right" minmax(0, 1fr)
+      / 1.08fr 1.04fr 1fr 1.34fr;
+    padding: 2.9rem 1.2rem 4.4rem;
+    background: var(--base);
+  }
+  section { padding: 0 2.2rem; min-width: 0; min-height: 0; }
+  .network, .quota, .credit, .right { border-left: 1px solid var(--line); }
+  .hardware { grid-area: hardware; display: flex; flex-direction: column; }
+  .network { grid-area: network; display: flex; flex-direction: column; }
+  .quota { grid-area: quota; --accent: var(--mint); display: flex; flex-direction: column; }
+  /* 重置卡占第三列下半格（原来 DeepSeek 的位置），高度与它此前一致 */
+  .credit { grid-area: deepseek; }
+  .deepseek { --accent: var(--blue); display: flex; flex-direction: column; justify-content: flex-end; min-height: 0; }
+  /* 右列整体跨两行：上 Agent 窗口吃满剩余高度，下 DeepSeek 只占自身高度、底端与左列最低点齐平 */
+  .right { grid-area: right; display: grid; grid-template-rows: minmax(0,1fr) auto; min-width: 0; }
+  .sessions { padding-right: 2.2rem; }
+  h2 {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 1.6rem;
+    font-weight: 650;
+    margin: 0 0 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .quiet, .meta { color: var(--muted); font-size: 1.22rem; font-weight: 400; }
+  .numeral, .value, .meta, output { font-variant-numeric: tabular-nums lining-nums; }
+  .value {
+    font-family: Bahnschrift, "Segoe UI Variable", sans-serif;
+    font-weight: 450;
+    line-height: .98;
+    font-size: 4.6rem;
+    letter-spacing: -.05em;
+    white-space: nowrap;
+  }
+  .value small { font: 450 1.6rem "Segoe UI Variable", "Microsoft YaHei UI", sans-serif; letter-spacing: 0; margin-left: .22rem; }
+  .row { display: flex; align-items: baseline; justify-content: space-between; gap: .7rem; min-width: 0; }
+  .label { color: var(--muted); font-size: 1.25rem; }
+  .windows { display: grid; gap: 2.1rem; }
+  /* 两个额度窗口在整列高度内均匀分布，避免全挤在顶部 */
+  .quota .windows { flex: 1 1 auto; align-content: space-around; padding-bottom: 1rem; }
+  /* 硬件三项（GPU / CPU / 硬盘）同一模式，纵向均分整列高度 */
+  .metrics { flex: 1 1 auto; display: flex; flex-direction: column; justify-content: space-between; gap: 1.6rem; min-height: 0; }
+  .metric { display: grid; gap: .6rem; }
+  .metric .row > span:first-child:not(.value) { font-size: 1.4rem; }
+  .metric .quiet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .metric .value { font-size: 3.7rem; }
+  .reading { align-items: end; }
+  .temp { font-size: 1.9rem; color: var(--ice); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .temp small { font-size: 1.2rem; }
+  .track { height: .45rem; background: var(--line); border-radius: 1rem; overflow: hidden; }
+  .track > span { display: block; width: var(--fill); height: 100%; background: var(--accent, var(--ice)); border-radius: inherit; }
+  .quota .value { font-size: 4.1rem; color: var(--mint); }
+  .window { display: grid; gap: .8rem; }
+  .window .label { color: var(--ink); }
+  .speeds { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .8rem; }
+  .speed { display: grid; gap: .7rem; min-width: 0; }
+  .speed .value { font-size: 3.9rem; }
+  .speed .unit { display: block; margin: .18rem 0 0; color: var(--muted); font-size: 1.15rem; }
+  /* VPN 块推到底部，与其它列下沿对齐 */
+  .vpn { position: relative; margin-top: auto; padding-top: 1.25rem; border-top: 1px solid var(--line); }
+  .tun { position: absolute; right: 0; bottom: calc(100% + .55rem); color: var(--muted); font-size: 1.2rem; white-space: nowrap; }
+  .status { display: inline-flex; gap: .55rem; align-items: center; color: var(--mint); font-size: 1.3rem; white-space: nowrap; }
+  .status::before { content: ""; width: .53rem; height: .53rem; border-radius: 50%; background: currentColor; }
+  .egress { margin: .8rem 0 1.5rem; color: var(--muted); font-size: 1.18rem; display: flex; gap: .8rem; align-items: baseline; white-space: nowrap; }
+  .ip { color: var(--ink); font-size: 1.4rem; letter-spacing: .02em; }
+  .vpn .speed { gap: .5rem; }
+  .vpn .value { font-size: 3.05rem; }
+  .vpn .label { font-size: 1.14rem; }
+  .deepseek h2, .quota h2 { margin-bottom: 1.2rem; padding-bottom: .8rem; font-size: 1.5rem; }
+  .deepseek .value { font-size: 3.2rem; color: var(--blue); }
+  .deepseek .meta { margin-top: .6rem; }
+  .brightness {
+    position: absolute; right: 3.4rem; bottom: 1.15rem;
+    display: flex; align-items: center; gap: .7rem; color: var(--muted); font-size: 1.2rem;
+  }
+  .controls { position: absolute; left: 3.4rem; bottom: 1rem; color: var(--muted); font-size: 1.2rem; }
+  .controls button { background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; padding: .3rem .6rem; }
+  .controls-menu { position: absolute; bottom: 2.6rem; left: 0; width: 17rem; padding: 1rem; background: #28333b; border: 1px solid var(--line); border-radius: .5rem; }
+  .controls-menu label { display: flex; align-items: center; gap: .7rem; white-space: nowrap; }
+  .controls-menu button { margin-top: .7rem; padding: .3rem 0; }
+  .controls-menu .key-field { display: grid; gap: .35rem; margin: .8rem 0 .2rem; }
+  .controls-menu .key-field > label { color: var(--muted); font-size: 1.05rem; }
+  .controls-menu .key-field input {
+    width: 100%; padding: .3rem .5rem; background: #1c252b; color: var(--ink);
+    border: 1px solid var(--line); border-radius: .3rem; font: inherit; font-size: 1.05rem;
+  }
+  .controls-menu .key-field input:focus { outline: none; border-color: var(--ice); }
+  .controls-menu .ds-key-save {
+    justify-self: start; margin-top: .1rem; padding: .25rem .9rem; background: var(--blue);
+    color: #0d1217; border: 0; border-radius: .3rem; cursor: pointer; font: inherit; font-size: 1.05rem;
+  }
+  .controls-menu .ds-key-save:hover { filter: brightness(1.12); }
+  .controls-menu .hide-panel { margin-top: .9rem; }
+  .brightness input {
+    appearance: none; width: 7rem; height: .38rem; margin: 0;
+    border-radius: 1rem; background: linear-gradient(to right, #9aafbe var(--level,60%), var(--line) var(--level,60%));
+  }
+  .brightness input::-webkit-slider-thumb { appearance: none; width: .85rem; height: .85rem; border-radius: 50%; background: #dae6ef; }
+  .brightness input::-moz-range-thumb { width: .85rem; height: .85rem; border: 0; border-radius: 50%; background: #dae6ef; }
+  .brightness output { min-width: 2.8em; text-align: right; }
+  .refresh {
+    position: absolute; left: 6.8rem; bottom: 1rem;
+    width: 2.5rem; height: 2.5rem; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; border: 0; color: var(--muted);
+    font-size: 1.5rem; cursor: pointer; border-radius: .5rem;
+  }
+  .refresh:hover { color: var(--ink); background: rgba(255, 255, 255, .05); }
+  .refresh svg { width: 1.25em; height: 1.25em; display: block; }
+  .refresh.spinning svg { animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  button:focus, input:focus { outline: 2px solid var(--ice); outline-offset: 5px; }
+  .dimmer { position: absolute; inset: 0; pointer-events: none; background: black; opacity: .08; }
+  .day { color: var(--muted); font-size: 1.2rem; white-space: nowrap; }
+  .day strong { color: var(--ink); font-weight: 500; }
+
+  /* ── Agent 窗口 ── */
+  .sessions { min-height: 0; display: flex; flex-direction: column; padding-top: .5rem; }
+  .sessions h3 { margin: 0; padding: 0 0 .7rem; border-bottom: 1px solid var(--line); font-size: 1.45rem; font-weight: 600; }
+  .tasks { list-style: none; flex: 1 1 auto; overflow-y: auto; min-height: 0; padding: 0; margin: .1rem -2.2rem 0; scrollbar-width: none; }
+  .tasks::-webkit-scrollbar { display: none; }
+  .task {
+    display: flex; align-items: center; gap: .7rem; cursor: pointer;
+    min-height: 3.03rem; border-bottom: 1px solid #303b44; font-size: 1.32rem;
+    padding: 0 2.2rem;
+  }
+  .task:hover { background: rgba(255, 255, 255, .035); }
+  .task:last-child { border-bottom: 0; }
+  /* 标题列固定宽度（8 全角字 + 省略号）；JS 已按前 k 单词/文字截断，这里兜底 */
+  .task-name { flex: 0 1 11.9rem; min-width: 6.4rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+  .task button { background: transparent; border: 0; color: inherit; font: inherit; padding: .3rem 0; cursor: pointer; }
+  .task button:hover { text-decoration: underline; }
+  .task-read { flex: 0 0 auto; color: var(--muted); }
+  .task-read[hidden] { display: none; }
+  .task-state { color: var(--status); display: inline-flex; align-items: center; gap: .65rem; white-space: nowrap; }
+  .task-state::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
+  .task-source { flex: 0 0 auto; font-size: .68rem; line-height: 1; padding: .12rem .4rem; border-radius: .3rem; white-space: nowrap; opacity: .9; }
+  .task-source.codex { background: rgba(161, 216, 196, .16); color: #a1d8c4; }
+  .task-source.claude { background: rgba(235, 166, 140, .16); color: #eba68c; }
+  .task-source.zcode { background: rgba(161, 200, 255, .16); color: #a1c8ff; }
+  .task-source.workbuddy { background: rgba(255, 211, 155, .16); color: #ffd39b; }
+  .task-source.scnet { background: rgba(199, 170, 255, .16); color: #c7aaff; }
+  .task-step { flex: 1 1 0; min-width: 0; color: var(--ice); font-size: 1.12rem; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+  [data-state="idle"] { --status: #a8b4bf; }
+  [data-state="writing"] { --status: #cfb9ed; }
+  [data-state="researching"] { --status: #a1d8c4; }
+  [data-state="executing"] { --status: #9fcee5; }
+  [data-state="syncing"] { --status: #e6c38a; }
+  [data-state="error"] { --status: #f2a6a0; }
+  [data-state="interactive"] { --status: #ff9e64; }
+  [data-state="unknown"], [data-state="interrupted"] { --status: #e6c38a; }
+  /* 结束 / 异常 / 待回复：全部改为静态状态条提示，彻底移除周期性明暗动画。
+     此前 softpulse 呼吸动画（3.4s / 2.6s infinite）本身就在持续明暗变化，
+     叠加每 2 秒的 DOM 重排后会让整块列表看起来"一直在闪"。 */
+  .task[data-state="idle"], .task[data-state="error"], .task[data-state="interactive"] {
+    border-radius: .35rem;
+    box-shadow: inset .25rem 0 0 var(--status);
+  }
+  /* 未读：静态淡底标记，不闪烁 */
+  .task.unread { background: rgba(255, 255, 255, .045); }
+  /* 待回复需要用户操作：静态橙色高亮（比未读更醒目），但绝不使用动画 */
+  .task[data-state="interactive"] { background: rgba(255, 158, 100, .13); }
+  /* 点击后立即反馈：跳转在后台线程执行，给用户「已收到」的信号，避免连点。
+     不用动画，只有一次静态高亮，700ms 后由 JS 移除。规则放在状态色之后以便覆盖。 */
+  .task.opening { background: rgba(159, 206, 229, .16); box-shadow: inset .25rem 0 0 #9fcee5; }
+  .task.opening .task-name { color: #cfe8f5; }
+  /* 空态：在列表剩余空间内水平居中、垂直靠上，避免贴着标题乱飘 */
+  .empty { flex: 1 1 auto; display: grid; place-items: start center; margin: 0; padding-top: 2.2rem; color: var(--muted); font-size: 1.2rem; }
+  .empty[hidden] { display: none; }
+
+  /* ── 重置卡（第三列下半格） ── */
+  .credit { display: flex; flex-direction: column; min-height: 0; padding: .9rem 2.2rem 0 2.2rem; }
+  .credit-head { align-items: baseline; padding-bottom: .7rem; border-bottom: 1px solid var(--line); }
+  .credit-head span { font-size: 1.45rem; font-weight: 600; }
+  .credit-head strong { color: var(--amber); font-size: 1.5rem; font-weight: 600; }
+  /* 初始预留 2 张卡的高度，更多时在区域内滚动 */
+  .cards {
+    list-style: none; margin: .6rem 0 0; padding: 0; flex: 0 1 auto;
+    min-height: 5.2rem; max-height: 100%; overflow-y: auto; scrollbar-width: none;
+  }
+  .cards::-webkit-scrollbar { display: none; }
+  .cards li {
+    display: flex; align-items: center; justify-content: space-between; gap: .8rem;
+    height: 2.35rem; padding: 0 .7rem; margin-bottom: .5rem;
+    background: #242c32; border-left: .2rem solid #8d7655; border-radius: 0 .35rem .35rem 0;
+    font-size: 1.18rem; white-space: nowrap;
+  }
+  .cards li em { font-style: normal; color: var(--amber); font-variant-numeric: tabular-nums; }
+  .cards .cards-empty { background: none; border-left: 0; color: var(--muted); padding-left: 0; }
+
+  @media (max-width: 700px) and (max-aspect-ratio: 7/4) {
+    :root { font-size: 10px; }
+    body { display: block; }
+    .panel { width: 100%; height: auto; grid-template: "hardware" auto "network" auto "quota" auto "deepseek" auto "right" auto / minmax(0,1fr); gap: 2.5rem; }
+    .panel section { border: 0; }
+    .metrics, .windows { gap: 1.5rem; }
+  }
+</style>
+</head>
+<body>
+<main class="panel" aria-label="副屏看板">
+  <section class="hardware" aria-labelledby="hardware">
+    <h2 id="hardware">硬件 <span class="quiet">利用率 / 温度</span></h2>
+    <div class="metrics">
+      <div class="metric gpu">
+        <div class="row"><span>GPU</span><span class="quiet">RTX 4060 Laptop</span></div>
+        <div class="row reading"><span class="value">42<small>%</small></span><span class="temp">62<small> °C</small></span></div>
+        <div class="track" aria-hidden="true"><span style="--fill:42%"></span></div>
+        <div class="meta">显存 3.8 / 8 GB</div>
+      </div>
+      <div class="metric cpu">
+        <div class="row"><span>CPU</span><span class="quiet">Core i9-13900H</span></div>
+        <div class="row reading"><span class="value">18<small>%</small></span><span class="temp">71<small> °C</small></span></div>
+        <div class="track" aria-hidden="true"><span style="--fill:18%"></span></div>
+        <div class="meta">内存 17.4 / 32 GB</div>
+      </div>
+      <div class="metric disk">
+        <div class="row"><span>硬盘</span><span class="quiet">C: / SSD</span></div>
+        <div class="row reading"><span class="value">284<small> GB 可用</small></span><span class="temp">72<small> %</small></span></div>
+        <div class="track" aria-hidden="true"><span style="--fill:72%"></span></div>
+        <div class="meta">总计 1.02 TB · 回收站 2.1 GB</div>
+      </div>
+    </div>
+  </section>
+  <section class="network" aria-labelledby="network">
+    <h2 id="network">网络 <span class="quiet">本机速率 / 今日</span></h2>
+    <div class="speeds">
+      <div class="speed"><span class="label">↓ 下载</span><span class="value">38.6<small class="unit">Mbps</small></span><span class="day numeral">今日 <strong>8.42 GB</strong></span></div>
+      <div class="speed"><span class="label">↑ 上传</span><span class="value">5.2<small class="unit">Mbps</small></span><span class="day numeral">今日 <strong>1.16 GB</strong></span></div>
+    </div>
+    <div class="vpn">
+      <label class="tun">TUN <input type="checkbox" aria-label="Clash TUN" checked></label>
+      <div class="row"><span>VPN</span><span class="status">已启用</span></div>
+      <div class="egress"><span>东京 · 日本</span><span class="numeral ip">203.0.113.42</span></div>
+      <div class="speeds">
+        <div class="speed"><span class="label">↓ 下载</span><span class="value">14.8<small class="unit">Mbps</small></span><span class="day numeral">今日 <strong>3.67 GB</strong></span></div>
+        <div class="speed"><span class="label">↑ 上传</span><span class="value">1.3<small class="unit">Mbps</small></span><span class="day numeral">今日 <strong>486 MB</strong></span></div>
+      </div>
+    </div>
+  </section>
+  <section class="quota" aria-labelledby="quota">
+    <h2 id="quota">Codex <span class="quiet">剩余额度</span></h2>
+    <div class="windows">
+      <div class="window">
+        <div class="row"><span class="label">今日预算剩余</span><span class="value">4<small>%</small></span></div>
+        <div class="track" aria-hidden="true"><span style="--fill:40%"></span></div>
+        <div class="meta">预算 10% · 11/14 09:30 更新</div>
+      </div>
+      <div class="window">
+        <div class="row"><span class="label">每周</span><span class="value">34<small>%</small></span></div>
+        <div class="track" aria-hidden="true"><span style="--fill:34%"></span></div>
+        <div class="meta">11 月 17 日 09:30 重置</div>
+      </div>
+    </div>
+  </section>
+  <div class="credit">
+    <div class="row credit-head"><span>重置卡</span><strong class="numeral">2 张</strong></div>
+    <ul class="cards" aria-label="可用重置卡">
+      <li><span>#1</span><em>11 月 22 日 23:59 到期</em></li>
+      <li><span>#2</span><em>12 月 03 日 08:00 到期</em></li>
+    </ul>
+  </div>
+  <div class="right">
+    <section class="sessions">
+      <h3 class="row">Agent 窗口 <span class="quiet" id="task-count" aria-live="polite">6 项未查看</span></h3>
+      <ul class="tasks" aria-label="Agent 会话状态">
+        <li class="task" data-state="error"><span class="task-source codex">Codex</span><span class="task-name">同步远程备份到 NAS 的定时任务</span><span class="task-step">远程连接超时，正在第三次重试</span><span class="task-state">异常</span></li>
+        <li class="task" data-state="executing"><span class="task-source claude">Claude Code</span><span class="task-name">运行面板回归测试</span><span class="task-step">执行: python -m unittest discover</span><span class="task-state">执行</span></li>
+        <li class="task" data-state="researching"><span class="task-source codex">Codex</span><span class="task-name">核对显卡传感器接口</span><span class="task-step">已定位两个 GPU 温度数据源，正在核对采样行为</span><span class="task-state">研究</span></li>
+        <li class="task" data-state="writing"><span class="task-source workbuddy">WB</span><span class="task-name">整理本周的开发记录</span><span class="task-step"></span><span class="task-state">写作</span></li>
+        <li class="task" data-state="syncing"><span class="task-source codex">Codex</span><span class="task-name">同步项目配置</span><span class="task-step">配置已保存，正在同步至远端仓库</span><span class="task-state">同步</span></li>
+        <li class="task" data-state="idle"><span class="task-source zcode">ZCode</span><span class="task-name">整理桌面文件清单</span><span class="task-step"></span><span class="task-state">待命</span></li>
+      </ul>
+      <p class="empty" hidden>暂无处理中或未查看的会话</p>
+    </section>
+    <section class="deepseek" aria-labelledby="deepseek">
+      <h2 id="deepseek">DeepSeek <span class="quiet">API 余额</span></h2>
+      <div class="row"><span class="value">42.50<small> CNY</small></span></div>
+      <div class="meta">其中赠送 5.00</div>
+    </section>
+  </div>
+  <label class="brightness">
+    <span>亮度</span><input type="range" min="20" max="100" value="68" aria-label="预览亮度"><output>68%</output>
+  </label>
+  <div class="controls">
+    <button type="button" aria-label="展开控制菜单" aria-expanded="false">⋯</button>
+    <div class="controls-menu" hidden>
+      <label><input type="checkbox"> 开机自动启动</label>
+      <div class="key-field">
+        <label for="ds-key">DeepSeek Key</label>
+        <input id="ds-key" class="ds-key" type="password" placeholder="sk-..." spellcheck="false" autocomplete="off">
+        <button type="button" class="ds-key-save">保存</button>
+      </div>
+      <button type="button" class="hide-panel">收回看板</button>
+    </div>
+  </div>
+  <button type="button" class="refresh" aria-label="刷新全部数据" title="刷新全部数据">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A8 8 0 1 0 19.73 14h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z" fill="currentColor"/></svg>
+  </button>
+  <div class="dimmer" aria-hidden="true"></div>
+</main>
+<dialog aria-labelledby="result-title">
+  <h2 id="result-title"></h2>
+  <p id="result-text"></p>
+  <form method="dialog"><button>关闭预览</button></form>
+</dialog>
+<script>
+  if (new URLSearchParams(location.search).get('review') === '1') {
+    const dialog = document.querySelector('dialog');
+    const summaries = {
+      error: '远程连接超时，备份尚未同步。',
+      executing: '回归测试已启动，正在运行窗口与采集检查。',
+      researching: '已定位两个可读的 GPU 温度数据源，正在核对采样行为。',
+      writing: '初稿已整理，正在补充本周变更说明。',
+      syncing: '配置已保存，正在同步至本机项目。',
+      idle: '桌面文件清单已整理完成。'
+    };
+    for (const task of document.querySelectorAll('.task')) {
+      const name = task.querySelector('.task-name');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = name.className;
+      button.textContent = name.textContent;
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        document.querySelector('#result-title').textContent = button.textContent;
+        document.querySelector('#result-text').textContent = summaries[task.dataset.state];
+        dialog.showModal();
+        task.remove();
+        const count = document.querySelectorAll('.task').length;
+        document.querySelector('#task-count').textContent = count + ' 项未查看';
+        document.querySelector('.empty').hidden = count > 0;
+      });
+      name.replaceWith(button);
+    }
+  }
+  const brightness = document.querySelector('.brightness input');
+  const brightnessOutput = document.querySelector('.brightness output');
+  function applyBrightness(value) {
+    const v = Math.max(20, Math.min(100, Number(value) || 68));
+    brightness.value = v;
+    if (brightnessOutput) brightnessOutput.value = v + '%';
+    brightness.style.setProperty('--level', (v - 20) * 1.25 + '%');
+    document.querySelector('.dimmer').style.opacity = (100 - v) / 400;
+  }
+  // 预览版用 localStorage 记忆亮度（运行版由后端 brightness.json 持久化）
+  try {
+    const saved = Number(localStorage.getItem('panel-brightness'));
+    if (saved) applyBrightness(saved);
+  } catch (e) {}
+  document.querySelector('.controls > button').addEventListener('click', event => {
+    const menu = document.querySelector('.controls-menu');
+    menu.hidden = !menu.hidden;
+    event.currentTarget.setAttribute('aria-expanded', String(!menu.hidden));
+  });
+  brightness.addEventListener('input', () => applyBrightness(brightness.value));
+  brightness.addEventListener('change', () => {
+    try { localStorage.setItem('panel-brightness', brightness.value); } catch (e) {}
+  });
+</script>
+</body>
+</html>
