@@ -224,13 +224,15 @@ def unread_sessions():
     seen = seen_load()
     with closing(sqlite3.connect((root / "state_5.sqlite").as_uri() + "?mode=ro", uri=True, timeout=2)) as state, \
          closing(sqlite3.connect((root / "thread_history_1.sqlite").as_uri() + "?mode=ro", uri=True, timeout=2)) as history:
-        rows = state.execute("""SELECT t.id, COALESCE(NULLIF(t.name,''), t.title), t.rollout_path,
-                   r.first_unread_turn, r.last_published_turn
+        receipt_columns = {column[1] for column in state.execute("PRAGMA table_info(thread_read_receipts)")}
+        revision_col = "r.revision" if "revision" in receipt_columns else "NULL"
+        rows = state.execute(f"""SELECT t.id, COALESCE(NULLIF(t.name,''), t.title), t.rollout_path, t.updated_at,
+                   r.first_unread_turn, r.last_published_turn, {revision_col}
             FROM threads t LEFT JOIN thread_read_receipts r ON r.thread_id=t.id
             WHERE t.archived=0 AND COALESCE(t.thread_source,'') <> 'subagent'
             ORDER BY t.updated_at DESC""").fetchall()
         result = []
-        for thread_id, title, path, unread, published in rows:
+        for thread_id, title, path, updated, unread, published, revision in rows:
             # 当前回合（DB 官方状态）：取该 thread 最新一条 turn 的 status
             db_status = None
             db_row = None
@@ -285,14 +287,16 @@ def unread_sessions():
                 status = activity or "executing"   # 没有实时活动细节时也至少显示“执行中”
             elif db_status == "failed" and (unread or fresh):
                 status = "error"
-            elif unread or db_status == "completed" or (published and db_status is None):
+            elif unread or db_status == "completed" or (db_status is None and (published or activity == "idle")):
                 status = "idle"
             else:
                 status = None
             if status is None:
                 continue
+            stamp = int((mtime or (updated if status == "idle" else 0) or 0) * 1000)
             result.append({"id": thread_id, "name": title, "status": status,
-                           "unread": bool(unread), "step": step, "source": "codex", "stamp": int(mtime * 1000)})
+                           "unread": bool(unread), "step": step, "source": "codex",
+                           "stamp": stamp, "receipt": revision or 0})
         return result
 
 
@@ -310,20 +314,34 @@ def _session_visible(item):
 def review_idle_sessions(items, previous):
     seen = seen_load()
     # 只保留已在看板提醒过的轮次，避免把客户端历史已读会话带进列表。
-    previous_idle = {(item["source"], item["id"], item["stamp"]) for item in previous
-                     if item["status"] == "idle"}
+    previous_by_session = {(item["source"], item["id"]): item for item in previous}
     visible = []
     for item in items:
-        if item["status"] == "idle" and item["stamp"] > 0:
-            source, sid, stamp = item["source"], item["id"], item["stamp"]
-            key = f"{source}:{sid}"
+        source, sid, stamp = item["source"], item["id"], item["stamp"]
+        key = f"{source}:{sid}"
+        last = previous_by_session.get((source, sid))
+        if item["status"] in PINNED:
+            # 有些客户端在新轮次开始时仍沿用旧的更新时间。
+            for state in ("reviewed", "dismissed"):
+                if f"{state}:{key}" in seen:
+                    seen_mark(f"{state}:{source}", sid, 0)
+        elif item["status"] == "idle" and stamp > 0:
+            receipt = item.get("receipt", 0) if source == "codex" else seen.get(key, 0)
+            if last and last["status"] in PINNED:
+                visible.append(item if item["unread"] else {**item, "unread": True, "read_after": receipt})
+                continue
             if stamp <= seen.get("dismissed:" + key, 0):
                 continue
-            read = not item["unread"] if source == "codex" else stamp <= seen.get(key, 0)
+            read = not item["unread"] if source == "codex" else stamp <= receipt
             reviewed = stamp == seen.get("reviewed:" + key)
-            if read and (source, sid, stamp) in previous_idle and not reviewed:
-                seen_mark("reviewed:" + source, sid, stamp)
-                reviewed = True
+            if last and last["status"] == "idle" and last["stamp"] == stamp and not reviewed:
+                read_after = last.get("read_after")
+                if read and (read_after is None or receipt > read_after):
+                    seen_mark("reviewed:" + source, sid, stamp)
+                    reviewed = True
+                elif read_after is not None and not item["unread"]:
+                    visible.append({**item, "unread": True, "read_after": read_after})
+                    continue
             if reviewed:
                 visible.append({**item, "read": True, "unread": False})
                 continue
@@ -2071,7 +2089,8 @@ def _open_session_job(kind, session_id, title, idle_stamp=0):
     try:
         if kind == "codex":
             # 优先按会话 ID 投递深链；协议不可用时才尝试 CDP。
-            _codex_open_session(session_id, title)
+            if _codex_open_session(session_id, title) and idle_stamp:
+                seen_mark("reviewed:" + kind, session_id, idle_stamp)
         elif kind == "workbuddy":
             # 聚焦 + explorer 投递 workbuddy://chat/<id> 深链
             _open_workbuddy_session(session_id)
@@ -2221,12 +2240,14 @@ class Bridge(QtCore.QObject):
         if not session_id:
             return
         args = (kind, session_id, title)
-        if kind in ("scnet", "claude"):
+        if kind in ("codex", "scnet", "claude"):
             with self.collector.lock:
                 stamp = next((item["stamp"] for item in self.collector.data.get("sessions") or []
                               if item["source"] == kind and item["id"] == session_id
-                              and item["status"] == "idle" and item["unread"]), 0)
-            args += (stamp,)
+                              and item["status"] == "idle" and item["unread"]
+                              and (kind != "codex" or "read_after" in item)), 0)
+            if stamp:
+                args += (stamp,)
         threading.Thread(target=_open_session_job, args=args,
                          daemon=True).start()
 
@@ -2237,7 +2258,7 @@ class Bridge(QtCore.QObject):
                          if item["source"] == kind and item["id"] == session_id), None)
             if not item or stamp != item["stamp"] or stamp <= 0:
                 return False
-            if item["status"] == "idle" and item.get("read"):
+            if item["status"] == "idle":
                 saved = seen_mark("dismissed:" + kind, session_id, stamp)
             elif (item["status"] in ("error", "unknown", "interrupted")
                   and (kind != "codex" or item["status"] == "interrupted")):

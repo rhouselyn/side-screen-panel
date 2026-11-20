@@ -104,16 +104,17 @@ class FrontendRegressionTest(unittest.TestCase):
           const idleRow = document.querySelector('.task');
           const check = idleRow.querySelector('.task-read');
           const state = idleRow.querySelector('.task-state');
-          result.idle = [state.textContent, check.hidden];
+          result.idle = [state.textContent, check.hidden, check.textContent, check.title];
           data.sessions[0] = {...data.sessions[0], unread: false, read: true};
           render(data);
           result.read = [state.textContent, check.hidden,
-            idleRow === document.querySelector('.task'), check.title];
+            idleRow === document.querySelector('.task'), check.textContent, check.title];
           data.sessions[0] = {...data.sessions[0], status: 'executing', read: false, stamp: 4322};
           render(data);
           result.newTurn = [state.textContent, check.hidden, idleRow === document.querySelector('.task')];
-          data.sessions[0] = {...data.sessions[0], status: 'idle', read: true};
+          data.sessions[0] = {...data.sessions[0], status: 'idle', unread: true};
           render(data);
+          result.newCompletion = [state.textContent, check.hidden, check.textContent];
           check.click();
           data.sessions = [];
           render(data);
@@ -164,9 +165,10 @@ class FrontendRegressionTest(unittest.TestCase):
         self.assertEqual(result["claudeSource"], "Claude Code")
         self.assertTrue(result["tun"])
         self.assertTrue(result["readVisible"])
-        self.assertEqual(result["idle"], ["待命", True])
-        self.assertEqual(result["read"], ["已读", False, True, "移除已读条目"])
+        self.assertEqual(result["idle"], ["待命", False, "×", "移除待命条目"])
+        self.assertEqual(result["read"], ["已读", False, True, "✓", "移除已读条目"])
         self.assertEqual(result["newTurn"], ["执行", True, True])
+        self.assertEqual(result["newCompletion"], ["待命", False, "×"])
         self.assertEqual(result["marked"], [["scnet", "two", 1234], ["claude", "claude", 4322]])
         self.assertTrue(result["dismissed"])
         self.assertEqual(result["navigation"], [[False, None], [False, None], [True, "unique"], [True, "wanted"]])

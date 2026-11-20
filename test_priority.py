@@ -306,12 +306,9 @@ class PriorityRegressionTest(unittest.TestCase):
             collector = SimpleNamespace(lock=threading.Lock(), request_refresh=MagicMock(), data={"sessions": [
                 {"source": "scnet", "id": "sid", "stamp": 1234, "status": "idle", "unread": True}]})
             bridge = dashboard.Bridge(None, collector, None, None)
-            self.assertFalse(bridge.mark_session_seen("scnet", "sid", 1234))
             row = collector.data["sessions"][0]
             dashboard.seen_mark("reviewed:scnet", "sid", 1234)
             collector.data["sessions"] = dashboard.review_idle_sessions([row], [])
-            active = {**row, "status": "executing", "unread": False}
-            self.assertEqual(dashboard.review_idle_sessions([active], collector.data["sessions"]), [active])
             self.assertTrue(bridge.mark_session_seen("scnet", "sid", 1234))
             self.assertEqual(dashboard.seen_load()["dismissed:scnet:sid"], 1234)
             self.assertEqual(dashboard.review_idle_sessions([row], []), [])
@@ -320,8 +317,40 @@ class PriorityRegressionTest(unittest.TestCase):
             collector.data["sessions"] = dashboard.review_idle_sessions([newer], collector.data["sessions"])
             self.assertEqual(collector.data["sessions"], [newer])
             self.assertFalse(bridge.mark_session_seen("scnet", "sid", 1234))
-            newer["status"] = "executing"
+            self.assertTrue(bridge.mark_session_seen("scnet", "sid", 1235))
+            self.assertEqual(dashboard.review_idle_sessions([newer], []), [])
+            running = {**newer, "status": "executing", "unread": False}
+            collector.data["sessions"] = dashboard.review_idle_sessions([running], [])
             self.assertFalse(bridge.mark_session_seen("scnet", "sid", 1235))
+            self.assertEqual(dashboard.review_idle_sessions([newer], collector.data["sessions"]), [newer])
+
+    def test_new_turn_rearms_review_even_when_source_reuses_stamp(self):
+        with tempfile.TemporaryDirectory() as temp, patch("dashboard.SEEN_FILE", Path(temp) / "seen.json"):
+            dashboard.seen_mark("reviewed:workbuddy", "sid", 1234)
+            dashboard.seen_mark("workbuddy", "sid", 1234)
+            idle = {"source": "workbuddy", "id": "sid", "stamp": 1234, "status": "idle", "unread": False}
+            [read] = dashboard.review_idle_sessions([idle], [])
+            self.assertTrue(read["read"])
+            active = {**idle, "status": "executing"}
+            previous = dashboard.review_idle_sessions([active], [read])
+            for _ in range(2):
+                previous = dashboard.review_idle_sessions([idle], previous)
+                self.assertEqual(len(previous), 1)
+                self.assertTrue(previous[0]["unread"])
+                self.assertFalse(previous[0].get("read", False))
+            dashboard.seen_mark("workbuddy", "sid", 1235)
+            [reopened] = dashboard.review_idle_sessions([idle], previous)
+            self.assertTrue(reopened["read"])
+
+    def test_codex_completion_waits_for_a_new_receipt(self):
+        with tempfile.TemporaryDirectory() as temp, patch("dashboard.SEEN_FILE", Path(temp) / "seen.json"):
+            active = {"source": "codex", "id": "sid", "stamp": 1234, "status": "executing", "unread": False}
+            idle = {**active, "stamp": 1235, "status": "idle", "receipt": 8}
+            waiting = dashboard.review_idle_sessions([idle], [active])
+            self.assertTrue(waiting[0]["unread"])
+            self.assertEqual(dashboard.review_idle_sessions([idle], waiting), waiting)
+            [read] = dashboard.review_idle_sessions([{**idle, "receipt": 9}], waiting)
+            self.assertTrue(read["read"])
 
     def test_workbuddy_old_active_receipt_does_not_read_new_completion(self):
         now = int(time.time() * 1000)

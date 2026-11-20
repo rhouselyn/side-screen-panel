@@ -198,7 +198,6 @@ function render(data) {
       const read = document.createElement('button');
       read.type = 'button';
       read.className = 'task-read';
-      read.textContent = '✓';
       read.addEventListener('click', event => {
         event.stopPropagation();
         if (window.bridge) window.bridge.mark_session_seen(row.dataset.source, row.dataset.id, Number(row.dataset.stamp), ok => {
@@ -231,11 +230,14 @@ function render(data) {
     if (row.dataset.stamp !== String(task.stamp || 0)) row.dataset.stamp = String(task.stamp || 0);
     const canMarkUnread = isUnread && ['error', 'unknown', 'interrupted'].includes(task.status)
       && (task.source !== 'codex' || task.status === 'interrupted');
-    setHidden(row.children[4], !task.read && !canMarkUnread);
-    const readAction = task.read ? '移除已读条目' : '标为已读';
-    if (row.children[4].title !== readAction) row.children[4].title = readAction;
+    const idle = task.status === 'idle';
+    const actionButton = row.children[4];
+    setHidden(actionButton, !(task.stamp > 0 && (idle || canMarkUnread)));
+    const readAction = task.read ? '移除已读条目' : idle ? '移除待命条目' : '标为已读';
+    setText(actionButton, idle && !task.read ? '×' : '✓');
+    if (actionButton.title !== readAction) actionButton.title = readAction;
     const readLabel = readAction + '：' + task.name;
-    if (row.children[4].getAttribute('aria-label') !== readLabel) row.children[4].setAttribute('aria-label', readLabel);
+    if (actionButton.getAttribute('aria-label') !== readLabel) actionButton.setAttribute('aria-label', readLabel);
     if (row.classList.contains('unread') !== isUnread) row.classList.toggle('unread', isUnread);
     const nameEl = row.children[1], stepEl = row.children[2], stateEl = row.children[3];
     const newName = shortTitle(task.name);

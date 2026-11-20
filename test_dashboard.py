@@ -24,8 +24,8 @@ class SessionProgressTest(unittest.TestCase):
             with state:
                 state.executescript("""
                     CREATE TABLE threads(id,name,title,rollout_path,archived,thread_source,updated_at);
-                    CREATE TABLE thread_read_receipts(thread_id,first_unread_turn,last_published_turn);
-                    INSERT INTO thread_read_receipts VALUES ('thread','old','old');
+                    CREATE TABLE thread_read_receipts(thread_id,first_unread_turn,last_published_turn,revision);
+                    INSERT INTO thread_read_receipts VALUES ('thread','old','old',4);
                 """)
                 state.execute("INSERT INTO threads VALUES (?,?,?,?,0,'user',0)", ("thread", "", "测试会话", str(rollout)))
             with closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history, history:
@@ -53,6 +53,7 @@ class SessionProgressTest(unittest.TestCase):
                 pending = dashboard.unread_sessions()
                 self.assertEqual(pending[0]["status"], "idle")
                 self.assertTrue(pending[0]["unread"])
+                self.assertEqual(pending[0]["receipt"], 4)
                 with state:
                     state.execute("UPDATE thread_read_receipts SET first_unread_turn=NULL")
                 items = dashboard.unread_sessions()
@@ -69,6 +70,13 @@ class SessionProgressTest(unittest.TestCase):
                     history.execute("INSERT INTO thread_turns VALUES ('thread','new','completed',2)")
                     history.execute("INSERT INTO thread_turns VALUES ('thread','newer','failed',3)")
                 self.assertEqual(dashboard.unread_sessions()[0]["status"], "error")
+                rollout.unlink()
+                with state:
+                    state.execute("UPDATE threads SET updated_at=1234")
+                    state.execute("UPDATE thread_read_receipts SET first_unread_turn='newer'")
+                with closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history, history:
+                    history.execute("UPDATE thread_turns SET status='completed' WHERE turn_id='newer'")
+                self.assertEqual(dashboard.unread_sessions()[0]["stamp"], 1234000)
             finally:
                 state.close()
 
