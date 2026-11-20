@@ -118,7 +118,8 @@ def sessions(seen):
         try:
             stat = path.stat()
             stamp = stat.st_mtime_ns // 1_000_000
-            if sid not in live and now - stat.st_mtime >= RECENT_SECONDS:
+            if (sid not in live and now - stat.st_mtime >= RECENT_SECONDS
+                    and stamp != seen.get("reviewed:claude:" + sid)):
                 continue
             if sid in items and items[sid]["stamp"] >= stamp:
                 continue

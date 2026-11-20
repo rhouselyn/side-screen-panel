@@ -101,6 +101,24 @@ class FrontendRegressionTest(unittest.TestCase):
           result.claudeSource = document.querySelector('.task-source.claude').textContent;
           result.tun = !document.querySelector('.tun').hidden && document.querySelector('.tun input').checked;
 
+          const idleRow = document.querySelector('.task');
+          const check = idleRow.querySelector('.task-read');
+          const state = idleRow.querySelector('.task-state');
+          result.idle = [state.textContent, check.hidden];
+          data.sessions[0] = {...data.sessions[0], unread: false, read: true};
+          render(data);
+          result.read = [state.textContent, check.hidden,
+            idleRow === document.querySelector('.task'), check.title];
+          data.sessions[0] = {...data.sessions[0], status: 'executing', read: false, stamp: 4322};
+          render(data);
+          result.newTurn = [state.textContent, check.hidden, idleRow === document.querySelector('.task')];
+          data.sessions[0] = {...data.sessions[0], status: 'idle', read: true};
+          render(data);
+          check.click();
+          data.sessions = [];
+          render(data);
+          result.dismissed = !document.querySelector('.task');
+
           const fixture = document.createElement('div');
           document.body.append(fixture);
           function navigate(rows) {
@@ -146,7 +164,11 @@ class FrontendRegressionTest(unittest.TestCase):
         self.assertEqual(result["claudeSource"], "Claude Code")
         self.assertTrue(result["tun"])
         self.assertTrue(result["readVisible"])
-        self.assertEqual(result["marked"], [["scnet", "two", 1234]])
+        self.assertEqual(result["idle"], ["待命", True])
+        self.assertEqual(result["read"], ["已读", False, True, "移除已读条目"])
+        self.assertEqual(result["newTurn"], ["执行", True, True])
+        self.assertEqual(result["marked"], [["scnet", "two", 1234], ["claude", "claude", 4322]])
+        self.assertTrue(result["dismissed"])
         self.assertEqual(result["navigation"], [[False, None], [False, None], [True, "unique"], [True, "wanted"]])
         page.deleteLater()
         self.app.processEvents()

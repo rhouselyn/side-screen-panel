@@ -54,7 +54,7 @@ DEEPSEEK_CONFIG = DATA_DIR / "deepseek.json"
 # 故单独存到 brightness.json，启动/刷新时由前端 get_brightness 取回恢复。
 BRIGHTNESS_CONFIG = DATA_DIR / "brightness.json"
 BUDGET_FILE = DATA_DIR / "quota-day.json"
-# 会话“已读”本地缓存：记录客户端打开事件或用户显式确认的时间，后续新回合仍会提醒。
+# 会话回执及看板确认记录，按会话更新时间区分轮次。
 SEEN_FILE = DATA_DIR / "seen-sessions.json"
 SYSTEM_DRIVE = Path(os.environ["SystemRoot"]).drive or Path.home().drive
 # 面板最多列出的会话条数，防止刷屏
@@ -285,7 +285,7 @@ def unread_sessions():
                 status = activity or "executing"   # 没有实时活动细节时也至少显示“执行中”
             elif db_status == "failed" and (unread or fresh):
                 status = "error"
-            elif unread:
+            elif unread or db_status == "completed" or (published and db_status is None):
                 status = "idle"
             else:
                 status = None
@@ -304,8 +304,32 @@ PINNED = ACTIVE + ("interactive",)
 def _session_visible(item):
     if item["status"] in PINNED:
         return True
-    # 终态只在有未读标记时保留提醒。
     return bool(item.get("unread"))
+
+
+def review_idle_sessions(items, previous):
+    seen = seen_load()
+    # 只保留已在看板提醒过的轮次，避免把客户端历史已读会话带进列表。
+    previous_idle = {(item["source"], item["id"], item["stamp"]) for item in previous
+                     if item["status"] == "idle"}
+    visible = []
+    for item in items:
+        if item["status"] == "idle" and item["stamp"] > 0:
+            source, sid, stamp = item["source"], item["id"], item["stamp"]
+            key = f"{source}:{sid}"
+            if stamp <= seen.get("dismissed:" + key, 0):
+                continue
+            read = not item["unread"] if source == "codex" else stamp <= seen.get(key, 0)
+            reviewed = stamp == seen.get("reviewed:" + key)
+            if read and (source, sid, stamp) in previous_idle and not reviewed:
+                seen_mark("reviewed:" + source, sid, stamp)
+                reviewed = True
+            if reviewed:
+                visible.append({**item, "read": True, "unread": False})
+                continue
+        if _session_visible(item):
+            visible.append(item)
+    return visible
 
 
 def claude_sessions():
@@ -315,15 +339,16 @@ def claude_sessions():
 
 
 def cap_sessions(sessions, limit=MAX_SESSIONS):
-    """排序 + 上限裁剪：处理中/待回复全部保留，只裁终态提醒。
+    """排序 + 上限裁剪：处理中/待回复及待移除的已读条目全部保留。
 
     旧版一把 [:MAX_SESSIONS] 会把活跃会话挤掉（会话一多就「少显示几条」）。
     """
     sessions = sorted(sessions, key=lambda s: (s["status"] not in PINNED,
                                                -int(s.get("stamp") or 0)))
     pinned = [s for s in sessions if s["status"] in PINNED]
-    rest = [s for s in sessions if s["status"] not in PINNED]
-    return pinned + rest[:max(0, limit - len(pinned))]
+    unread = [s for s in sessions if s["status"] not in PINNED and not s.get("read")]
+    read = [s for s in sessions if s.get("read")]
+    return pinned + unread[:max(0, limit - len(pinned))] + read
 
 
 def _is_codex_exe(exe):
@@ -1128,7 +1153,7 @@ def scnet_progress(session_path):
 def scnet_sessions():
     # SCNet（超算互联网）客户端会话：索引在 ~/.sclaw/agent/threads.json，
     # 每轮事件流在 sessions/<时间戳>_<uuid>.jsonl（与 Codex/ZCode 同源的 agent 框架）。
-    # 本地无已读回执，只能由用户显式标记已读。
+    # 本地无已读回执，从看板投递会话深链后记录该轮次已读。
     threads = Path(os.environ["USERPROFILE"]) / ".sclaw" / "agent" / "threads.json"
     if not threads.exists():
         return []
@@ -1398,8 +1423,7 @@ def workbuddy_sessions():
             if mapped == "executing" and now_ms - max(stamp, event["ts"]) > 3600 * 1000:
                 mapped = "unknown"
             # db 仍标 working 时，比 db.updated_at 更早的终态事件属于上一轮的残留，
-            # 不能把新一轮在跑的会话覆盖成「待命」：一旦再被判成已读，条目会整个消失，
-            # 表现就是「三个会话在跑，面板只显示两个」。
+            # 不能把新一轮在跑的会话覆盖成「待命」。
             if (row.get("status") == "working" and mapped in ("idle", "error", "interactive")
                     and event["ts"] < (row.get("updated") or 0)):
                 mapped = None
@@ -1414,7 +1438,7 @@ def workbuddy_sessions():
         seen = seen_cache.get("workbuddy:" + sid, 0)
         receipt = events["seen"].get(sid, 0)
         if focused_seen:
-            receipt = max(receipt, event["ts"])
+            receipt = max(receipt, stamp)
         if receipt > seen:
             seen_mark("workbuddy", sid, receipt)
             seen = receipt
@@ -2008,7 +2032,6 @@ class Collector(QtCore.QObject):
                         available = True
                     except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError):
                         continue
-                sessions = cap_sessions([s for s in items if _session_visible(s)]) if available else None
                 # nvidia-smi 启动一次约 0.2s：缓存 10 秒再查，避免每 2 秒 spawn 一次拖慢整机。
                 if now - _GPU_CACHE["ts"] >= 10:
                     value = None
@@ -2026,6 +2049,7 @@ class Collector(QtCore.QObject):
                 memory = psutil.virtual_memory()
                 cpu_temp = cpu_temperature()
                 with self.lock:
+                    sessions = cap_sessions(review_idle_sessions(items, self.data["sessions"] or [])) if available else None
                     self.data.update({"cpu": psutil.cpu_percent(None), "gpu": gpu,
                                       "cpu_temp": cpu_temp, "cpu_model": cpu_model(), "system_drive": SYSTEM_DRIVE,
                                       "memory": [memory.used, memory.total], "network": speeds,
@@ -2038,7 +2062,7 @@ class Collector(QtCore.QObject):
             self._refresh["fast"].wait(2)
 
 
-def _open_session_job(kind, session_id, title):
+def _open_session_job(kind, session_id, title, idle_stamp=0):
     """点击条目后真正执行跳转，只允许在后台线程里跑。
 
     QWebChannel 的 slot 在 Qt 主线程执行；旧版除 codex 外都直接在 slot 里做窗口枚举、
@@ -2065,6 +2089,8 @@ def _open_session_job(kind, session_id, title):
         elif kind == "scnet":
             # SCNet 4.1.2 已在启动和 second-instance 中接收会话深链。
             if _SESSION_ID.fullmatch(session_id) and _open_url("scnet://threads/" + session_id):
+                if idle_stamp:
+                    seen_mark("reviewed:" + kind, session_id, idle_stamp)
                 return
             focused = _focus_window(_is_scnet_exe)
             if not focused and not _client_running("计算服务"):
@@ -2074,7 +2100,8 @@ def _open_session_job(kind, session_id, title):
         elif kind == "claude":
             for item in claude_sessions():
                 if item["id"] == session_id:
-                    claude_code.resume_session(session_id, item["path"])
+                    if claude_code.resume_session(session_id, item["path"]) and idle_stamp:
+                        seen_mark("reviewed:" + kind, session_id, idle_stamp)
                     break
     except OSError:
         pass
@@ -2193,7 +2220,14 @@ class Bridge(QtCore.QObject):
         # 重复点击由前端节流（1s）；这里不排队，用户快速改点另一条时后点的最后置前。
         if not session_id:
             return
-        threading.Thread(target=_open_session_job, args=(kind, session_id, title),
+        args = (kind, session_id, title)
+        if kind in ("scnet", "claude"):
+            with self.collector.lock:
+                stamp = next((item["stamp"] for item in self.collector.data.get("sessions") or []
+                              if item["source"] == kind and item["id"] == session_id
+                              and item["status"] == "idle" and item["unread"]), 0)
+            args += (stamp,)
+        threading.Thread(target=_open_session_job, args=args,
                          daemon=True).start()
 
     @QtCore.pyqtSlot(str, str, float, result=bool)
@@ -2201,14 +2235,17 @@ class Bridge(QtCore.QObject):
         with self.collector.lock:
             item = next((item for item in self.collector.data.get("sessions") or []
                          if item["source"] == kind and item["id"] == session_id), None)
-        if not item or item["status"] not in ("idle", "error", "unknown", "interrupted"):
-            return False
-        if stamp != item["stamp"] or stamp <= 0:
-            return False
-        if kind == "codex" and item["status"] != "interrupted":
-            return False
-        if not seen_mark(kind, session_id, stamp):
-            return False
+            if not item or stamp != item["stamp"] or stamp <= 0:
+                return False
+            if item["status"] == "idle" and item.get("read"):
+                saved = seen_mark("dismissed:" + kind, session_id, stamp)
+            elif (item["status"] in ("error", "unknown", "interrupted")
+                  and (kind != "codex" or item["status"] == "interrupted")):
+                saved = seen_mark(kind, session_id, stamp)
+            else:
+                return False
+            if not saved:
+                return False
         self.collector.request_refresh()
         return True
 

@@ -304,14 +304,23 @@ class PriorityRegressionTest(unittest.TestCase):
     def test_explicit_mark_only_acknowledges_the_displayed_snapshot(self):
         with tempfile.TemporaryDirectory() as temp, patch("dashboard.SEEN_FILE", Path(temp) / "seen.json"):
             collector = SimpleNamespace(lock=threading.Lock(), request_refresh=MagicMock(), data={"sessions": [
-                {"source": "scnet", "id": "sid", "stamp": 1234, "status": "idle"}]})
+                {"source": "scnet", "id": "sid", "stamp": 1234, "status": "idle", "unread": True}]})
             bridge = dashboard.Bridge(None, collector, None, None)
-            self.assertTrue(bridge.mark_session_seen("scnet", "sid", 1234))
-            self.assertEqual(dashboard.seen_load(), {"scnet:sid": 1234})
-            self.assertFalse(bridge.mark_session_seen("scnet", "missing", 1234))
-            collector.data["sessions"][0]["stamp"] = 1235
             self.assertFalse(bridge.mark_session_seen("scnet", "sid", 1234))
-            collector.data["sessions"][0]["status"] = "executing"
+            row = collector.data["sessions"][0]
+            dashboard.seen_mark("reviewed:scnet", "sid", 1234)
+            collector.data["sessions"] = dashboard.review_idle_sessions([row], [])
+            active = {**row, "status": "executing", "unread": False}
+            self.assertEqual(dashboard.review_idle_sessions([active], collector.data["sessions"]), [active])
+            self.assertTrue(bridge.mark_session_seen("scnet", "sid", 1234))
+            self.assertEqual(dashboard.seen_load()["dismissed:scnet:sid"], 1234)
+            self.assertEqual(dashboard.review_idle_sessions([row], []), [])
+            self.assertFalse(bridge.mark_session_seen("scnet", "missing", 1234))
+            newer = {**row, "stamp": 1235}
+            collector.data["sessions"] = dashboard.review_idle_sessions([newer], collector.data["sessions"])
+            self.assertEqual(collector.data["sessions"], [newer])
+            self.assertFalse(bridge.mark_session_seen("scnet", "sid", 1234))
+            newer["status"] = "executing"
             self.assertFalse(bridge.mark_session_seen("scnet", "sid", 1235))
 
     def test_workbuddy_old_active_receipt_does_not_read_new_completion(self):
@@ -362,7 +371,7 @@ class PriorityRegressionTest(unittest.TestCase):
             self.assertEqual(dashboard.unread_sessions(), [])
             with path.open("a") as stream:
                 stream.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t"}}) + "\n")
-            self.assertEqual(dashboard.unread_sessions(), [])
+            self.assertEqual(dashboard.review_idle_sessions(dashboard.unread_sessions(), []), [])
 
 
 if __name__ == "__main__":

@@ -7,14 +7,16 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import dashboard
 
 
 class SessionProgressTest(unittest.TestCase):
-    def test_live_turn_replaces_old_failure_and_leaves_when_read(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"USERPROFILE": temp}):
+    def test_live_turn_replaces_old_failure_and_stays_until_dismissed(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"USERPROFILE": temp}), \
+             patch("dashboard.SEEN_FILE", Path(temp) / "seen.json"):
             root = Path(temp) / ".codex"
             root.mkdir()
             rollout = root / "turn.jsonl"
@@ -48,10 +50,20 @@ class SessionProgressTest(unittest.TestCase):
                 append("item_started", item={"type": "McpToolCall"})
                 self.assertEqual(dashboard.unread_sessions()[0]["status"], "syncing")
                 append("task_complete")
-                self.assertEqual(dashboard.unread_sessions()[0]["status"], "idle")
+                pending = dashboard.unread_sessions()
+                self.assertEqual(pending[0]["status"], "idle")
+                self.assertTrue(pending[0]["unread"])
                 with state:
                     state.execute("UPDATE thread_read_receipts SET first_unread_turn=NULL")
-                self.assertEqual(dashboard.unread_sessions(), [])
+                items = dashboard.unread_sessions()
+                self.assertEqual(dashboard.review_idle_sessions(items, []), [])
+                read = dashboard.review_idle_sessions(items, pending)
+                self.assertTrue(read[0]["read"])
+                self.assertFalse(read[0]["unread"])
+                self.assertEqual(dashboard.review_idle_sessions(items, []), read)
+                self.assertEqual(dashboard.cap_sessions(read, limit=0), read)
+                dashboard.seen_mark("dismissed:codex", "thread", read[0]["stamp"])
+                self.assertEqual(dashboard.review_idle_sessions(items, read), [])
                 # 日志尚未追上已落库的新回合时，仍以新回合的官方失败状态为准。
                 with closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history, history:
                     history.execute("INSERT INTO thread_turns VALUES ('thread','new','completed',2)")
@@ -442,7 +454,8 @@ class OpenSessionDispatchTest(unittest.TestCase):
              patch("dashboard._open_url", side_effect=forbidden), \
              patch("dashboard._codex_open_session", side_effect=forbidden), \
              patch("dashboard._open_workbuddy_session", side_effect=forbidden):
-            bridge = dashboard.Bridge.__new__(dashboard.Bridge)
+            collector = SimpleNamespace(lock=dashboard.threading.Lock(), data={"sessions": []})
+            bridge = dashboard.Bridge(None, collector, None, None)
             for kind in ("codex", "workbuddy", "zcode", "scnet"):
                 bridge.open_session(kind, "sid-1", "标题")
         self.assertEqual(len(started), 4)
@@ -469,9 +482,11 @@ class OpenSessionDispatchTest(unittest.TestCase):
     def test_scnet_uses_its_supported_thread_route_before_focusing(self):
         sid = "bd74d4a3-a13e-46cb-b22c-b8b7f9c4d067"
         with patch("dashboard._open_url", return_value=True) as send, \
-             patch("dashboard._focus_window") as focus, patch("dashboard.subprocess.Popen") as launch:
-            dashboard._open_session_job("scnet", sid, "标题")
+             patch("dashboard._focus_window") as focus, patch("dashboard.subprocess.Popen") as launch, \
+             patch("dashboard.seen_mark") as mark:
+            dashboard._open_session_job("scnet", sid, "标题", 1234)
             send.assert_called_once_with("scnet://threads/" + sid)
+            mark.assert_called_once_with("reviewed:scnet", sid, 1234)
             focus.assert_not_called()
             launch.assert_not_called()
 
@@ -654,7 +669,7 @@ class WorkBuddyClickLoopTest(unittest.TestCase):
 class ZcodeResumeTest(unittest.TestCase):
     """ZCode 桌面端没有会话深链/CDP/当前会话回执，但打开会话都会写日志：
     冷启动是 session.resumed，已驻留会话的切换有时只有 lifecycle_changed(starting)。
-    两种都算「用户直接打开了」：读到就记已读，条目消失；之后新回合的 updated
+    两种都算「用户直接打开了」：读到就记已读；之后新回合的 updated
     会大于该时间戳，仍会重新提醒。stopping/unloaded 是切走，不算。"""
 
     def build(self, temp, updated_ms, resume_offset_ms, kind="resumed"):
@@ -688,7 +703,7 @@ class ZcodeResumeTest(unittest.TestCase):
             return (rows[0] if rows else None), dashboard.seen_load()
 
     def test_resume_log_marks_read(self):
-        # updated 在 2 分钟前（fresh 且非 live），1 分钟前直接打开过 → 已读，条目消失
+        # updated 在 2 分钟前（fresh 且非 live），1 分钟前直接打开过 → 已读
         now = time.time() * 1000
         row, seen = self.run_case(now - 120_000, 60_000)
         self.assertIsNotNone(row)

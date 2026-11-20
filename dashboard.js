@@ -166,7 +166,7 @@ function render(data) {
   }
   const list = select('.tasks');
   const scrollPosition = list.scrollTop;
-  const NAMES = {idle:'待命', writing:'写作', researching:'研究', executing:'执行', syncing:'同步', error:'异常', interactive:'待回复', unknown:'未确认', interrupted:'已中断'};
+  const NAMES = {idle:'待命', read:'已读', writing:'写作', researching:'研究', executing:'执行', syncing:'同步', error:'异常', interactive:'待回复', unknown:'未确认', interrupted:'已中断'};
   // 按 source:id 复用 <li> 节点、原地更新文字/状态，而非每 2 秒整列销毁重建：
   // 否则 idle/error 行上的 softpulse 呼吸动画会被反复拉回起点（看起来就是不停闪烁），
   // 且处理中会话步骤文字变化时也只更新那一行，不会波及其它行的动画。
@@ -199,11 +199,10 @@ function render(data) {
       read.type = 'button';
       read.className = 'task-read';
       read.textContent = '✓';
-      read.title = '标为已读';
       read.addEventListener('click', event => {
         event.stopPropagation();
         if (window.bridge) window.bridge.mark_session_seen(row.dataset.source, row.dataset.id, Number(row.dataset.stamp), ok => {
-          if (!ok) alert('会话已更新或无法保存已读记录，请重试');
+          if (!ok) alert('会话已更新或无法保存操作，请重试');
         });
       });
       row.append(source, name, step, state, read);
@@ -224,14 +223,18 @@ function render(data) {
       });
       rows[key] = row;
     }
-    if (row.dataset.state !== task.status) row.dataset.state = task.status;
+    const state = task.read ? 'read' : task.status;
+    if (row.dataset.state !== state) row.dataset.state = state;
     // 标题可能被后端改写；点击时要用最新的完整标题（Codex 靠标题兜底找会话行）
     if (row.dataset.name !== (task.name || '')) row.dataset.name = task.name || '';
     const isUnread = !!task.unread;
     if (row.dataset.stamp !== String(task.stamp || 0)) row.dataset.stamp = String(task.stamp || 0);
-    setHidden(row.children[4], !isUnread || !['idle', 'error', 'unknown', 'interrupted'].includes(task.status)
-      || (task.source === 'codex' && task.status !== 'interrupted'));
-    const readLabel = '标为已读：' + task.name;
+    const canMarkUnread = isUnread && ['error', 'unknown', 'interrupted'].includes(task.status)
+      && (task.source !== 'codex' || task.status === 'interrupted');
+    setHidden(row.children[4], !task.read && !canMarkUnread);
+    const readAction = task.read ? '移除已读条目' : '标为已读';
+    if (row.children[4].title !== readAction) row.children[4].title = readAction;
+    const readLabel = readAction + '：' + task.name;
     if (row.children[4].getAttribute('aria-label') !== readLabel) row.children[4].setAttribute('aria-label', readLabel);
     if (row.classList.contains('unread') !== isUnread) row.classList.toggle('unread', isUnread);
     const nameEl = row.children[1], stepEl = row.children[2], stateEl = row.children[3];
@@ -240,7 +243,7 @@ function render(data) {
     if (nameEl.title !== task.name) nameEl.title = task.name;
     const newStep = task.step || '';
     if (stepEl.textContent !== newStep) { stepEl.textContent = newStep; stepEl.title = newStep; }
-    const newState = NAMES[task.status] || '待命';
+    const newState = NAMES[state] || '待命';
     if (stateEl.textContent !== newState) stateEl.textContent = newState;
   }
   // 仅在成员/顺序真的变化时才整体重排一次，顺序不变时一个节点都不动。
