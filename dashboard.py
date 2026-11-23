@@ -2128,6 +2128,7 @@ def _open_session_job(kind, session_id, title, idle_stamp=0):
 
 class Bridge(QtCore.QObject):
     update = QtCore.pyqtSignal(str)
+    tun_finished = QtCore.pyqtSignal(bool)
 
     def __init__(self, window, collector, web, tray):
         super().__init__()
@@ -2145,6 +2146,13 @@ class Bridge(QtCore.QObject):
         # 前端点击刷新按钮：立刻唤醒三个采集线程各跑一轮，覆盖硬件/网络/会话/额度/DeepSeek，
         # 采集结果经 bridge.update 推回前端，render 重绘所有区块（全局刷新）。
         self.collector.request_refresh()
+
+    @QtCore.pyqtSlot(bool)
+    def request_tun(self, enabled):
+        # Clash 请求不能阻塞 Qt 主线程，否则点击后的圆心也要等网络返回才能绘制。
+        def apply():
+            self.tun_finished.emit(self.set_tun(enabled))
+        threading.Thread(target=apply, daemon=True).start()
 
     @QtCore.pyqtSlot(bool, result=bool)
     def set_tun(self, enabled):

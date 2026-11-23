@@ -324,13 +324,15 @@ new QWebChannel(qt.webChannelTransport, channel => {
     bridge.get_brightness(v => { if (v) applyBrightness(v); });
   }
   const tun = select('.tun input');
+  let tunPrevious = tun.checked;
+  bridge.tun_finished.connect(success => {
+    if (!success) { tun.checked = tunPrevious; alert('TUN 设置失败，请检查 Clash'); }
+    tun.disabled = false;
+  });
   tun.addEventListener('change', () => {
-    const enabled = tun.checked;
+    tunPrevious = !tun.checked;
     tun.disabled = true;
-    bridge.set_tun(enabled, success => {
-      if (!success) { tun.checked = !enabled; alert('TUN 设置失败，请检查 Clash'); }
-      tun.disabled = false;
-    });
+    bridge.request_tun(tun.checked);
   });
   const startup = select('.controls-menu input');
   bridge.startup_enabled(value => { startup.checked = value; });

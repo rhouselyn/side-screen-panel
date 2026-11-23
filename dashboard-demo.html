@@ -95,6 +95,10 @@
   /* VPN 块推到底部，与其它列下沿对齐 */
   .vpn { position: relative; margin-top: auto; padding-top: 1.25rem; border-top: 1px solid var(--line); }
   .tun { position: absolute; right: 0; bottom: calc(100% + .55rem); color: var(--muted); font-size: 1.2rem; white-space: nowrap; }
+  .tun input { -webkit-appearance: none; appearance: none; width: 1.15rem; height: 1.15rem; margin: 0 0 0 .35rem; border: 1px solid var(--muted); border-radius: 50%; vertical-align: -.15rem; cursor: pointer; }
+  .tun input:checked { background: radial-gradient(circle, var(--blue) 0 42%, transparent 46%); }
+  .tun input:focus { outline: none; box-shadow: none; border-color: var(--blue); }
+  .tun input:disabled { cursor: wait; }
   .status { display: inline-flex; gap: .55rem; align-items: center; color: var(--mint); font-size: 1.3rem; white-space: nowrap; }
   .status::before { content: ""; width: .53rem; height: .53rem; border-radius: 50%; background: currentColor; }
   .egress { margin: .8rem 0 1.5rem; color: var(--muted); font-size: 1.18rem; display: flex; gap: .8rem; align-items: baseline; white-space: nowrap; }
