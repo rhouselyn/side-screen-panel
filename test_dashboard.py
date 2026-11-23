@@ -49,6 +49,27 @@ class SessionProgressTest(unittest.TestCase):
                 self.assertEqual(dashboard.unread_sessions()[0]["status"], "writing")
                 append("item_started", item={"type": "McpToolCall"})
                 self.assertEqual(dashboard.unread_sessions()[0]["status"], "syncing")
+                with closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history, history:
+                    history.execute("INSERT INTO thread_turns VALUES ('thread','new','inProgress',2)")
+                def response(**payload):
+                    with rollout.open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps({"type": "response_item", "payload": payload}) + "\n")
+                response(type="function_call", name="request_user_input", call_id="q1",
+                         arguments=json.dumps({"questions": [{"question": "选择哪种方案？"}]}))
+                [question] = dashboard.unread_sessions()
+                self.assertEqual((question["status"], question["step"]), ("interactive", "选择哪种方案？"))
+                self.assertTrue(dashboard.review_idle_sessions([question], [])[0]["unread"])
+                response(type="function_call_output", call_id="q1", output='{"answers": {}}')
+                self.assertEqual(dashboard.unread_sessions()[0]["status"], "executing")
+                response(type="function_call", name="functions.request_user_input_async", call_id="q2",
+                         arguments=json.dumps({"questions": [{"title": "是否继续？"}]}))
+                response(type="function_call_output", call_id="q2", output='{"accepted": true}')
+                response(type="message", role="assistant", content=[{"type": "output_text", "text": "继续检查"}])
+                self.assertEqual(dashboard.unread_sessions()[0]["status"], "interactive")
+                response(type="message", role="user", content=[])
+                self.assertEqual(dashboard.unread_sessions()[0]["status"], "executing")
+                with closing(sqlite3.connect(root / "thread_history_1.sqlite")) as history, history:
+                    history.execute("DELETE FROM thread_turns WHERE turn_id='new'")
                 append("task_complete")
                 pending = dashboard.unread_sessions()
                 self.assertEqual(pending[0]["status"], "idle")
@@ -112,6 +133,27 @@ class ZcodeStepTest(unittest.TestCase):
 
 
 class ZcodeSessionTest(unittest.TestCase):
+    def test_question_tool_waits_until_answered(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"USERPROFILE": temp}), \
+             patch("dashboard.SEEN_FILE", Path(temp) / "seen.json"), \
+             patch("dashboard.zcode_step", return_value=None), patch("dashboard.zcode_live", return_value=True):
+            db = Path(temp) / ".zcode/cli/db/db.sqlite"
+            db.parent.mkdir(parents=True)
+            now = int(time.time() * 1000)
+            with closing(sqlite3.connect(db)) as conn, conn:
+                conn.executescript("""
+                    CREATE TABLE session(id,title,directory,time_updated,time_archived);
+                    CREATE TABLE turn_usage(session_id,status,started_at);
+                    CREATE TABLE tool_usage(session_id,tool_name,status,started_at,completed_at);
+                """)
+                conn.execute("INSERT INTO session VALUES ('s1','询问','',?,NULL)", (now,))
+                conn.execute("INSERT INTO tool_usage VALUES ('s1','AskUserQuestion','running',?,NULL)", (now,))
+                conn.execute("INSERT INTO tool_usage VALUES ('s1','Bash','running',?,NULL)", (now+1,))
+            self.assertEqual(dashboard.zcode_sessions()[0]["status"], "interactive")
+            with closing(sqlite3.connect(db)) as conn, conn:
+                conn.execute("UPDATE tool_usage SET status='completed', completed_at=? WHERE tool_name='AskUserQuestion'", (now+1,))
+            self.assertEqual(dashboard.zcode_sessions()[0]["status"], "executing")
+
     def test_title_falls_back_to_directory_tail(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"USERPROFILE": temp}):
             db = Path(temp) / ".zcode" / "cli" / "db" / "db.sqlite"

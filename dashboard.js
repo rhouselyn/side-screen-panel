@@ -243,7 +243,7 @@ function render(data) {
     const newName = shortTitle(task.name);
     setText(nameEl, newName);
     if (nameEl.title !== task.name) nameEl.title = task.name;
-    const newStep = task.step || '';
+    const newStep = task.step || (task.status === 'interactive' ? '等待你的回答或确认' : '');
     if (stepEl.textContent !== newStep) { stepEl.textContent = newStep; stepEl.title = newStep; }
     const newState = NAMES[state] || '待命';
     if (stateEl.textContent !== newState) stateEl.textContent = newState;
@@ -267,6 +267,10 @@ function render(data) {
   setText(select('.empty'), data.sessions ? '暂无处理中或未查看的会话' : '会话状态暂不可用');
 }
 const dsKeyInput = select('.ds-key');
+function closeSettings() {
+  select('.controls-menu').hidden = true;
+  select('.controls > button').setAttribute('aria-expanded', 'false');
+}
 select('.controls > button').addEventListener('click', event => {
   const menu = select('.controls-menu');
   menu.hidden = !menu.hidden;
@@ -280,11 +284,9 @@ select('.controls > button').addEventListener('click', event => {
 document.addEventListener('click', event => {
   const controls = select('.controls');
   const menu = select('.controls-menu');
-  const btn = select('.controls > button');
   if (!menu || menu.hidden) return;
   if (controls && controls.contains(event.target)) return;  // 点在按钮或菜单内不收
-  menu.hidden = true;
-  if (btn) btn.setAttribute('aria-expanded', 'false');
+  closeSettings();
 });
 // 左下角刷新按钮：点击即让后端立即重新采集全部数据并推回前端重绘（全局刷新）。
 select('.refresh').addEventListener('click', () => {
@@ -334,7 +336,7 @@ new QWebChannel(qt.webChannelTransport, channel => {
     tun.disabled = true;
     bridge.request_tun(tun.checked);
   });
-  const startup = select('.controls-menu input');
+  const startup = select('.startup');
   bridge.startup_enabled(value => { startup.checked = value; });
   startup.addEventListener('change', () => {
     bridge.set_startup(startup.checked, success => {
@@ -345,6 +347,23 @@ new QWebChannel(qt.webChannelTransport, channel => {
     });
   });
   select('.hide-panel').addEventListener('click', () => bridge.hide_panel());
+  const readBehavior = select('.read-behavior');
+  bridge.get_keep_read_sessions(keep => { readBehavior.value = keep ? 'keep' : 'hide'; });
+  readBehavior.addEventListener('change', () => {
+    const keep = readBehavior.value === 'keep';
+    readBehavior.disabled = true;
+    bridge.set_keep_read_sessions(keep, ok => {
+      if (!ok) {
+        readBehavior.value = keep ? 'hide' : 'keep';
+        alert('已读条目设置保存失败');
+      }
+      readBehavior.disabled = false;
+    });
+  });
+  select('.copy-screenshot').addEventListener('click', () => {
+    closeSettings();
+    bridge.copy_screenshot();
+  });
   // “⋯”菜单里填入 DeepSeek Key 后保存：写回后端配置并立即刷新余额显示
   const dsSaveBtn = select('.ds-key-save');
   dsSaveBtn.addEventListener('click', event => {

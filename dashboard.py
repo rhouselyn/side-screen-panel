@@ -53,6 +53,7 @@ DEEPSEEK_CONFIG = DATA_DIR / "deepseek.json"
 # 预览亮度持久化：亮度滑块只在拖动时改 CSS，不落盘；每次启动都回到 HTML 默认 68，
 # 故单独存到 brightness.json，启动/刷新时由前端 get_brightness 取回恢复。
 BRIGHTNESS_CONFIG = DATA_DIR / "brightness.json"
+READ_BEHAVIOR_CONFIG = DATA_DIR / "read-behavior.json"
 BUDGET_FILE = DATA_DIR / "quota-day.json"
 # 会话回执及看板确认记录，按会话更新时间区分轮次。
 SEEN_FILE = DATA_DIR / "seen-sessions.json"
@@ -135,10 +136,15 @@ _ITEM_ACTIVITY = {
     "mcptoolcall": "syncing", "commandexecution": "executing",
 }
 
+QUESTION_TOOLS = ("request_user_input", "request_user_input_async", "AskUserQuestion",
+                  "ask_user_question", "question")
+
 
 def _rollout_status(state):
     # 与旧的“尾部倒序扫描”语义一致：最近一次 task_started/complete/aborted 决定状态，
     # running 时用最近一次条目活动细化（尚无条目则 executing）。
+    if state.get("question_call") and state["terminal"] not in ("error", "interrupted"):
+        return "interactive"
     if state["terminal"] == "running":
         return state["activity"] or "executing"
     if state["terminal"] in ("idle", "error", "interrupted"):
@@ -188,9 +194,12 @@ def rollout_progress(path, size, modified):
                 state.update(terminal="idle", turn_id=payload.get("turn_id"))
             elif kind == "turn_aborted":
                 state.update(terminal={"failed": "error", "interrupted": "interrupted"}.get(payload.get("reason"), "idle"),
-                             turn_id=payload.get("turn_id"))
+                             turn_id=payload.get("turn_id"), question_call=None)
             elif kind == "task_started":
-                state.update(terminal="running", turn_id=payload.get("turn_id"), activity=None, step=None)
+                state.update(terminal="running", turn_id=payload.get("turn_id"), activity=None,
+                             step=None, question_call=None)
+            elif kind == "user_message":
+                state.update(question_call=None, activity="executing", step=None)
             elif kind in ("item_started", "item_completed"):
                 item = payload.get("item") or {}
                 if not isinstance(item, dict):
@@ -199,13 +208,19 @@ def rollout_progress(path, size, modified):
                 if mapped:
                     state["activity"] = mapped
         elif record_type == "response_item":
-            if kind == "message" and payload.get("role") == "assistant":
+            if kind == "message" and payload.get("role") == "user":
+                state.update(question_call=None, activity="executing", step=None)
+            elif kind == "function_call_output" and payload.get("call_id") == state.get("question_call"):
+                if not state.get("question_async"):
+                    state.update(question_call=None, activity="executing", step=None)
+            elif kind == "message" and payload.get("role") == "assistant":
                 # 步骤预览取最新一条助手消息首行（末次命中即最新）
                 for content in payload.get("content", []):
                     if not isinstance(content, dict):
                         continue
                     if content.get("type") == "output_text" and content.get("text"):
-                        state["step"] = content["text"].strip().split("\n", 1)[0].strip()[:90]
+                        if not state.get("question_call"):
+                            state["step"] = content["text"].strip().split("\n", 1)[0].strip()[:90]
                         break
                 state["activity"] = "writing"
             elif kind == "web_search_call":
@@ -214,8 +229,18 @@ def rollout_progress(path, size, modified):
                 name = payload.get("name") or ""
                 state["activity"] = ("researching" if "web_run" in name
                                      else "writing" if name == "apply_patch" else "executing")
-                if kind == "custom_tool_call":
+                if kind == "custom_tool_call" and not state.get("question_call"):
                     state["step"] = tool_label(payload.get("name"), payload.get("input"))
+                if name.rsplit(".", 1)[-1].rsplit("__", 1)[-1] in QUESTION_TOOLS:
+                    state.update(question_call=payload.get("call_id"),
+                                 question_async=name.endswith("_async"), step="等待你的回答或确认")
+                    try:
+                        args = json.loads(payload.get("arguments") or "{}")
+                        question = args["questions"][0]
+                        state["step"] = str(question.get("question") or question.get("title")
+                                            or state["step"])[:90]
+                    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+                        pass
     return state["turn_id"], _rollout_status(state), state["step"]
 
 
@@ -283,6 +308,8 @@ def unread_sessions():
                 if int(mtime * 1000) <= seen.get("codex:" + thread_id, 0):
                     continue
                 status, unread = "interrupted", True
+            elif activity == "interactive" and db_status not in ("failed", "interrupted"):
+                status, unread = "interactive", True
             elif live:
                 status = activity or "executing"   # 没有实时活动细节时也至少显示“执行中”
             elif db_status == "failed" and (unread or fresh):
@@ -311,7 +338,7 @@ def _session_visible(item):
     return bool(item.get("unread"))
 
 
-def review_idle_sessions(items, previous):
+def review_idle_sessions(items, previous, keep_read=True):
     seen = seen_load()
     # 只保留已在看板提醒过的轮次，避免把客户端历史已读会话带进列表。
     previous_by_session = {(item["source"], item["id"]): item for item in previous}
@@ -343,7 +370,8 @@ def review_idle_sessions(items, previous):
                     visible.append({**item, "unread": True, "read_after": read_after})
                     continue
             if reviewed:
-                visible.append({**item, "read": True, "unread": False})
+                if keep_read:
+                    visible.append({**item, "read": True, "unread": False})
                 continue
         if _session_visible(item):
             visible.append(item)
@@ -966,6 +994,19 @@ def zcode_tool_running(conn, session_id, last_done, horizon_ms=24 * 3600 * 1000)
     return bool(row and row[0] and time.time() * 1000 - row[0] < horizon_ms)
 
 
+def zcode_waiting_question(conn, session_id, last_done):
+    try:
+        placeholders = ",".join("?" for _ in QUESTION_TOOLS)
+        row = conn.execute(
+            "SELECT tool_name, started_at FROM tool_usage WHERE session_id=? "
+            "AND status='running' AND completed_at IS NULL AND started_at>? "
+            f"AND tool_name IN ({placeholders}) ORDER BY started_at DESC LIMIT 1",
+            (session_id, last_done, *QUESTION_TOOLS)).fetchone()
+        return bool(row and time.time() * 1000 - row[1] < 24 * 3600 * 1000)
+    except sqlite3.Error:
+        return False
+
+
 def zcode_live(session_id, updated, last_done=0):
     # ZCode 的 turn_usage 只在每轮结束后落库（无 inProgress 记录），单看它会把正在跑的会话
     # 误判成 idle。用两个实时信号兜底：model-io 日志在“上一轮结束之后”又被追加（每次模型
@@ -1014,7 +1055,9 @@ def zcode_sessions():
             # 只有“刚落下”的 error 才压过实时信号——error 落库瞬间 session.updated 可能
             # 比 completed_at 晚 2s+，会触发 zcode_live 的 90 秒兜底而误判成执行中。
             error_fresh = turn_status == "error" and time.time() * 1000 - last_done < 90_000
-            if (zcode_tool_running(conn, sid, last_done)
+            if zcode_waiting_question(conn, sid, last_done):
+                status = "interactive"
+            elif (zcode_tool_running(conn, sid, last_done)
                     or (not error_fresh and zcode_live(sid, updated, last_done))):
                 status = "executing"
             elif turn_status == "error":
@@ -1146,6 +1189,11 @@ def scnet_progress(session_path):
                 elif role == "assistant":
                     status = {"stop": "idle", "error": "error", "aborted": "interrupted",
                               "toolUse": "executing"}.get(message.get("stopReason"), "unknown")
+                    if status == "executing" and any(
+                            isinstance(block, dict) and block.get("type") == "toolCall"
+                            and block.get("name") in QUESTION_TOOLS
+                            for block in message.get("content") or []):
+                        status = "interactive"
                     if status == "error":
                         step = str(message.get("errorMessage") or "")[:90] or None
             if role != "assistant":
@@ -1955,6 +2003,10 @@ class Collector(QtCore.QObject):
                      "sessions": None, "cpu_temp": None, "deepseek": {"state": "读取中"}}
         self.last_net = None
         self.lock = threading.Lock()
+        try:
+            self.keep_read_sessions = json.loads(READ_BEHAVIOR_CONFIG.read_text(encoding="utf-8")) is not False
+        except (OSError, ValueError):
+            self.keep_read_sessions = True
         self.daily = DailyTraffic()
         self.budget = DailyBudget()
         self.last_vpn = None
@@ -1993,21 +2045,27 @@ class Collector(QtCore.QObject):
             self._refresh["slow"].wait(10 if self.pending_tun is not None else 300)
 
     def quotas(self):
+        next_balance = 0
         while True:
+            refresh_requested = self._refresh["quotas"].is_set()
             self._refresh["quotas"].clear()
             try:
                 value = None if os.environ.get("DASH_SKIP_QUOTA") else codex_limits()
             except (OSError, subprocess.SubprocessError):
                 value = None
             daily_budget = self.budget.update(value) if value else None
-            balance = deepseek_balance()
+            balance = None
+            if refresh_requested or time.monotonic() >= next_balance:
+                balance = deepseek_balance()
+                next_balance = time.monotonic() + 60
             with self.lock:
                 if value:
                     self.data["codex"] = value
                     self.data["daily_budget"] = daily_budget
                 self.data["quota_state"] = "" if value else "读取失败，正在重试"
-                self.data["deepseek"] = balance
-            delay = min(60, max(1, daily_budget["resetsAt"] - time.time())) if daily_budget else 60
+                if balance is not None:
+                    self.data["deepseek"] = balance
+            delay = min(15, max(1, daily_budget["resetsAt"] - time.time())) if daily_budget else 15
             self._refresh["quotas"].wait(delay if value else 10)
 
     def fast(self):
@@ -2067,7 +2125,8 @@ class Collector(QtCore.QObject):
                 memory = psutil.virtual_memory()
                 cpu_temp = cpu_temperature()
                 with self.lock:
-                    sessions = cap_sessions(review_idle_sessions(items, self.data["sessions"] or [])) if available else None
+                    sessions = cap_sessions(review_idle_sessions(
+                        items, self.data["sessions"] or [], self.keep_read_sessions)) if available else None
                     self.data.update({"cpu": psutil.cpu_percent(None), "gpu": gpu,
                                       "cpu_temp": cpu_temp, "cpu_model": cpu_model(), "system_drive": SYSTEM_DRIVE,
                                       "memory": [memory.used, memory.total], "network": speeds,
@@ -2134,6 +2193,43 @@ class Bridge(QtCore.QObject):
         super().__init__()
         self.window = window
         self.collector = collector
+        self.web = web
+        self.tray = tray
+
+    @QtCore.pyqtSlot(result=bool)
+    def get_keep_read_sessions(self):
+        with self.collector.lock:
+            return self.collector.keep_read_sessions
+
+    @QtCore.pyqtSlot(bool, result=bool)
+    def set_keep_read_sessions(self, enabled):
+        with self.collector.lock:
+            try:
+                temp = READ_BEHAVIOR_CONFIG.with_suffix(".tmp")
+                temp.write_text(json.dumps(enabled), encoding="utf-8")
+                os.replace(temp, READ_BEHAVIOR_CONFIG)
+            except OSError:
+                return False
+            self.collector.keep_read_sessions = enabled
+        self.collector.request_refresh()
+        return True
+
+    def prepare_screenshot(self, capture):
+        # 等菜单隐藏后的合成帧完成，再抓取面板。
+        self.web.page().runJavaScript("closeSettings()", lambda _: QtCore.QTimer.singleShot(100, capture))
+
+    @QtCore.pyqtSlot()
+    def copy_screenshot(self):
+        def capture():
+            try:
+                pixmap = self.web.grab()
+                if pixmap.isNull():
+                    raise OSError("无法获取面板截图")
+                QtWidgets.QApplication.clipboard().setPixmap(pixmap)
+                self.tray.showMessage("截图已复制", "可直接粘贴到聊天或文档")
+            except Exception as error:
+                self.tray.showMessage("截图失败", str(error))
+        self.prepare_screenshot(capture)
 
     @QtCore.pyqtSlot()
     def hide_panel(self):
@@ -2437,6 +2533,8 @@ def main():
     show_action = menu.addAction("显示看板")
     hide_action = menu.addAction("收回看板")
     shot_action = menu.addAction("保存面板截图")
+    copy_shot_action = menu.addAction("复制面板截图")
+    copy_shot_action.triggered.connect(bridge.copy_screenshot)
     reload_action = menu.addAction("重新加载页面")
     reload_action.triggered.connect(lambda: (_render_failures.clear(), web.reload()))
     menu.addSeparator()
@@ -2473,7 +2571,7 @@ def main():
             except Exception:
                 pass
 
-    shot_action.triggered.connect(_save_shot)
+    shot_action.triggered.connect(lambda: bridge.prepare_screenshot(_save_shot))
     tray.setContextMenu(menu)
     tray.activated.connect(lambda reason: _show_panel() if reason == QtWidgets.QSystemTrayIcon.DoubleClick else None)
     tray.show()

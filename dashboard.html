@@ -117,6 +117,8 @@
   .controls button { background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer; padding: .3rem .6rem; }
   .controls-menu { position: absolute; bottom: 2.6rem; left: 0; width: 17rem; padding: 1rem; background: #28333b; border: 1px solid var(--line); border-radius: .5rem; }
   .controls-menu label { display: flex; align-items: center; gap: .7rem; white-space: nowrap; }
+  .controls-menu .read-setting { display: grid; gap: .35rem; margin-top: .8rem; }
+  .controls-menu select { background: #1c252b; color: var(--ink); border: 1px solid var(--line); padding: .3rem; font: inherit; width: 100%; }
   .controls-menu button { margin-top: .7rem; padding: .3rem 0; }
   .controls-menu .key-field { display: grid; gap: .35rem; margin: .8rem 0 .2rem; }
   .controls-menu .key-field > label { color: var(--muted); font-size: 1.05rem; }
@@ -171,6 +173,8 @@
   .task button { background: transparent; border: 0; color: inherit; font: inherit; padding: .3rem 0; cursor: pointer; }
   .task button:hover { text-decoration: underline; }
   .task-read { flex: 0 0 auto; color: var(--muted); }
+  .task[data-state="read"] .task-read,
+  .task[data-state="idle"] .task-read { color: var(--status); }
   .task-read[hidden] { display: none; }
   .task-state { color: var(--status); display: inline-flex; align-items: center; gap: .65rem; white-space: nowrap; }
   .task-state::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
@@ -181,7 +185,8 @@
   .task-source.workbuddy { background: rgba(255, 211, 155, .16); color: #ffd39b; }
   .task-source.scnet { background: rgba(199, 170, 255, .16); color: #c7aaff; }
   .task-step { flex: 1 1 0; min-width: 0; color: var(--ice); font-size: 1.12rem; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
-  [data-state="idle"], [data-state="read"] { --status: #a8b4bf; }
+  [data-state="idle"] { --status: #f49bcc; }
+  [data-state="read"] { --status: #b3bcc6; }
   [data-state="writing"] { --status: #cfb9ed; }
   [data-state="researching"] { --status: #a1d8c4; }
   [data-state="executing"] { --status: #9fcee5; }
@@ -189,17 +194,23 @@
   [data-state="error"] { --status: #f2a6a0; }
   [data-state="interactive"] { --status: #ff9e64; }
   [data-state="unknown"], [data-state="interrupted"] { --status: #e6c38a; }
-  /* 结束 / 异常 / 待回复：全部改为静态状态条提示，彻底移除周期性明暗动画。
-     此前 softpulse 呼吸动画（3.4s / 2.6s infinite）本身就在持续明暗变化，
-     叠加每 2 秒的 DOM 重排后会让整块列表看起来"一直在闪"。 */
+  /* 终态保持静态，待回复单独提示。 */
   .task[data-state="idle"], .task[data-state="error"], .task[data-state="interactive"] {
     border-radius: .35rem;
     box-shadow: inset .25rem 0 0 var(--status);
   }
   /* 未读：静态淡底标记，不闪烁 */
   .task.unread { background: rgba(255, 255, 255, .045); }
-  /* 待回复需要用户操作：静态橙色高亮（比未读更醒目），但绝不使用动画 */
-  .task[data-state="interactive"] { background: rgba(255, 158, 100, .13); }
+  .task[data-state="interactive"] {
+    background: rgba(255, 158, 100, .13);
+    animation: question-pulse 2s ease-in-out infinite;
+  }
+  @keyframes question-pulse {
+    50% { background: rgba(255, 158, 100, .30); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .task[data-state="interactive"] { animation: none; }
+  }
   /* 点击后立即反馈：跳转在后台线程执行，给用户「已收到」的信号，避免连点。
      不用动画，只有一次静态高亮，700ms 后由 JS 移除。规则放在状态色之后以便覆盖。 */
   .task.opening { background: rgba(159, 206, 229, .16); box-shadow: inset .25rem 0 0 #9fcee5; }
@@ -316,13 +327,20 @@
   <div class="controls">
     <button type="button" aria-label="展开控制菜单" aria-expanded="false">⋯</button>
     <div class="controls-menu" hidden>
-      <label><input type="checkbox"> 开机自动启动</label>
+      <label><input class="startup" type="checkbox"> 开机自动启动</label>
+      <label class="read-setting">已读条目
+        <select class="read-behavior">
+          <option value="keep">点击 ✓ 后消失</option>
+          <option value="hide">已读后直接消失</option>
+        </select>
+      </label>
       <div class="key-field">
         <label for="ds-key">DeepSeek Key</label>
         <input id="ds-key" class="ds-key" type="password" placeholder="sk-..." spellcheck="false" autocomplete="off">
         <button type="button" class="ds-key-save">保存</button>
       </div>
       <button type="button" class="hide-panel">收回看板</button>
+      <button type="button" class="copy-screenshot">复制截图</button>
     </div>
   </div>
   <button type="button" class="refresh" aria-label="刷新全部数据" title="刷新全部数据">

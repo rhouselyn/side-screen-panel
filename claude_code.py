@@ -83,6 +83,11 @@ def _transcript(path, size, mtime_ns):
                 status, step = "error", text
             elif tool in ("AskUserQuestion", "ExitPlanMode"):
                 status, step = "interactive", "等待确认"
+                tool_part = next(part for part in reversed(parts) if part.get("type") == "tool_use")
+                tool_input = tool_part.get("input") or {}
+                questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
+                if isinstance(questions, list) and questions and isinstance(questions[0], dict):
+                    step = str(questions[0].get("question") or step)
             elif isinstance(tool, str):
                 status, step = "executing", "执行: " + tool
             elif message.get("stop_reason") in ("end_turn", "stop_sequence", "max_tokens", "refusal"):

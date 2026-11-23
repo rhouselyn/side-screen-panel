@@ -62,6 +62,61 @@ class AuditRegressionTest(unittest.TestCase):
         save()
         self.assertEqual(tray.showMessage.call_args.args[0], "截图失败")
 
+    def test_read_behavior_defaults_to_keep_and_persists_with_safe_failure(self):
+        with tempfile.TemporaryDirectory() as temp, \
+             patch("dashboard.READ_BEHAVIOR_CONFIG", Path(temp) / "read.json"), \
+             patch("dashboard.SEEN_FILE", Path(temp) / "seen.json"), \
+             patch("dashboard.DailyTraffic"), patch("dashboard.DailyBudget"):
+            collector = dashboard.Collector()
+            collector.request_refresh = MagicMock()
+            bridge = dashboard.Bridge(None, collector, None, None)
+            self.assertTrue(bridge.get_keep_read_sessions())
+            idle = {"source": "scnet", "id": "sid", "stamp": 1234, "status": "idle", "unread": True}
+            dashboard.seen_mark("reviewed:scnet", "sid", 1234)
+            self.assertTrue(dashboard.review_idle_sessions([idle], [], collector.keep_read_sessions)[0]["read"])
+            self.assertTrue(bridge.set_keep_read_sessions(False))
+            self.assertFalse(dashboard.Collector().keep_read_sessions)
+            self.assertEqual(dashboard.review_idle_sessions([idle], [], collector.keep_read_sessions), [])
+            with patch("dashboard.os.replace", side_effect=OSError("disk unavailable")):
+                self.assertFalse(bridge.set_keep_read_sessions(True))
+            self.assertFalse(bridge.get_keep_read_sessions())
+            self.assertFalse(dashboard.Collector().keep_read_sessions)
+            active = {**idle, "status": "executing", "unread": False}
+            self.assertEqual(dashboard.review_idle_sessions([active], [], False), [active])
+            self.assertEqual(dashboard.review_idle_sessions([idle], [active], False), [idle])
+            dashboard.READ_BEHAVIOR_CONFIG.write_text("invalid", encoding="utf-8")
+            self.assertTrue(dashboard.Collector().keep_read_sessions)
+
+    def test_copy_screenshot_closes_settings_before_capture_and_preserves_clipboard_on_failure(self):
+        web, tray, clipboard = MagicMock(), MagicMock(), MagicMock()
+        events = []
+        def hide(script, done):
+            self.assertEqual(script, "closeSettings()")
+            events.append("hide")
+            done(None)
+        def wait(delay, capture):
+            self.assertGreater(delay, 0)
+            events.append("paint")
+            capture()
+        pixmap = MagicMock()
+        pixmap.isNull.return_value = False
+        def grab():
+            events.append("grab")
+            return pixmap
+        web.page.return_value.runJavaScript.side_effect = hide
+        web.grab.side_effect = grab
+        bridge = dashboard.Bridge(None, None, web, tray)
+        with patch("dashboard.QtCore.QTimer.singleShot", side_effect=wait), \
+             patch("dashboard.QtWidgets.QApplication.clipboard", return_value=clipboard):
+            bridge.copy_screenshot()
+            self.assertEqual(events, ["hide", "paint", "grab"])
+            clipboard.setPixmap.assert_called_once_with(pixmap)
+            clipboard.reset_mock()
+            pixmap.isNull.return_value = True
+            bridge.copy_screenshot()
+            clipboard.setPixmap.assert_not_called()
+            self.assertEqual(tray.showMessage.call_args.args[0], "截图失败")
+
     def test_seen_updates_are_atomic_and_never_go_backwards(self):
         with tempfile.TemporaryDirectory() as temp, patch("dashboard.SEEN_FILE", Path(temp) / "seen.json"):
             dashboard.seen_mark("wb", "one", 2000)
@@ -128,6 +183,31 @@ class AuditRegressionTest(unittest.TestCase):
             self.assertEqual(lookup.call_args.args[0], {
                 "http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"})
 
+    def test_tun_request_keeps_ui_thread_free_while_clash_is_busy(self):
+        bridge = dashboard.Bridge(None, None, None, None)
+        started, release, finished = [threading.Event() for _ in range(3)]
+        results = []
+
+        def slow_apply(enabled):
+            started.set()
+            release.wait(3)
+            return enabled
+
+        def done(success):
+            results.append(success)
+            finished.set()
+
+        bridge.tun_finished.connect(done, dashboard.QtCore.Qt.DirectConnection)
+        with patch.object(bridge, "set_tun", side_effect=slow_apply):
+            try:
+                bridge.request_tun(True)
+                self.assertTrue(started.wait(1))
+                self.assertFalse(finished.is_set())
+            finally:
+                release.set()
+                self.assertTrue(finished.wait(2))
+        self.assertEqual(results, [True])
+
     def test_tun_switch_checks_actual_clash_state_and_rejects_remote_controller(self):
         response = MagicMock()
         response.json.return_value = {"tun": {"enable": True}}
@@ -156,6 +236,28 @@ class AuditRegressionTest(unittest.TestCase):
             self.assertFalse(bridge.set_tun(True))
             request.assert_not_called()
         self.assertEqual(collector.request_refresh.call_count, 4)
+
+    def test_quota_refresh_is_faster_and_balance_keeps_its_own_interval(self):
+        for value, budget, delay in (({"rateLimits": {}}, None, 15),
+                                     ({"rateLimits": {}}, {"resetsAt": 1002}, 2),
+                                     (None, None, 10)):
+            with self.subTest(delay=delay), patch("dashboard.DailyTraffic"), patch("dashboard.DailyBudget"), \
+                 patch.dict("os.environ", {"DASH_SKIP_QUOTA": ""}), \
+                 patch("dashboard.codex_limits", return_value=value) as limits, \
+                 patch("dashboard.deepseek_balance", side_effect=[{"total": "1"}, {"total": "2"}]) as balance, \
+                 patch("dashboard.time.monotonic", return_value=0), patch("dashboard.time.time", return_value=1000):
+                collector = dashboard.Collector()
+                collector.budget.update.return_value = budget
+                event = MagicMock()
+                event.is_set.side_effect = [False, False, True]
+                event.wait.side_effect = [None, None, StopIteration]
+                collector._refresh["quotas"] = event
+                with self.assertRaises(StopIteration):
+                    collector.quotas()
+                self.assertEqual(limits.call_count, 3)
+                self.assertEqual([call.args[0] for call in event.wait.call_args_list], [delay] * 3)
+                self.assertEqual(balance.call_count, 2)
+                self.assertEqual(collector.data["deepseek"], {"total": "2"})
 
     def test_each_collector_keeps_refresh_requested_while_it_is_busy(self):
         with patch("dashboard.DailyTraffic"):

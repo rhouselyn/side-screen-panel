@@ -28,11 +28,21 @@ class FrontendRegressionTest(unittest.TestCase):
         html = (root / "dashboard.html").read_text(encoding="utf-8")
         html = html.replace('<script src="qrc:///qtwebchannel/qwebchannel.js"></script>', '')
         bridge = """const qt = {webChannelTransport: {}};
+          window.alert = () => {};
           window.opened = [];
           window.marked = [];
+          window.keepChanges = [];
+          window.copies = [];
           function QWebChannel(transport, ready) {
             ready({objects: {bridge: {
               update: {connect() {}}, startup_enabled(done) {done(false)},
+              tun_finished: {connect(done) {window.finishTun = done}},
+              request_tun(enabled) {window.requestedTun = enabled},
+              get_keep_read_sessions(done) {done(true)},
+              set_keep_read_sessions(keep, done) {window.keepChanges.push(keep); done(true)},
+              copy_screenshot() {window.copies.push([
+                document.querySelector('.controls-menu').hidden,
+                document.querySelector('.controls > button').getAttribute('aria-expanded')])},
               open_session(...args) {window.opened.push(args)},
               mark_session_seen(kind, id, stamp, done) {window.marked.push([kind, id, stamp]); done(true)}
             }}});
@@ -100,25 +110,58 @@ class FrontendRegressionTest(unittest.TestCase):
           result.plusRemaining = document.querySelector('.window .value').firstChild.nodeValue;
           result.claudeSource = document.querySelector('.task-source.claude').textContent;
           result.tun = !document.querySelector('.tun').hidden && document.querySelector('.tun input').checked;
+          const tunInput = document.querySelector('.tun input');
+          tunInput.focus();
+          result.tunStyle = [getComputedStyle(tunInput).webkitAppearance,
+            getComputedStyle(tunInput).outlineStyle, getComputedStyle(tunInput).backgroundImage];
+          tunInput.click();
+          result.tunPending = [tunInput.checked, tunInput.disabled, window.requestedTun,
+            getComputedStyle(tunInput).backgroundImage];
+          render(data);
+          result.tunDuringRefresh = tunInput.checked;
+          window.finishTun(false);
+          result.tunRollback = [tunInput.checked, tunInput.disabled];
+          tunInput.click();
+          window.finishTun(true);
+          result.tunSuccess = [tunInput.checked, tunInput.disabled];
 
           const idleRow = document.querySelector('.task');
           const check = idleRow.querySelector('.task-read');
           const state = idleRow.querySelector('.task-state');
-          result.idle = [state.textContent, check.hidden, check.textContent, check.title];
+          result.idle = [state.textContent, check.hidden, check.textContent, check.title,
+            getComputedStyle(check).color];
+          result.idleStateColor = getComputedStyle(state).color;
           data.sessions[0] = {...data.sessions[0], unread: false, read: true};
           render(data);
           result.read = [state.textContent, check.hidden,
-            idleRow === document.querySelector('.task'), check.textContent, check.title];
+            idleRow === document.querySelector('.task'), check.textContent, check.title,
+            getComputedStyle(check).color];
+          result.readStateColor = getComputedStyle(state).color;
+          data.sessions[0] = {...data.sessions[0], status: 'interactive', read: false, unread: true, step: '是否继续？'};
+          render(data);
+          result.question = [state.textContent, idleRow.querySelector('.task-step').textContent,
+            check.hidden, getComputedStyle(idleRow).animationName];
           data.sessions[0] = {...data.sessions[0], status: 'executing', read: false, stamp: 4322};
           render(data);
           result.newTurn = [state.textContent, check.hidden, idleRow === document.querySelector('.task')];
+          result.runningAnimation = getComputedStyle(idleRow).animationName;
           data.sessions[0] = {...data.sessions[0], status: 'idle', unread: true};
           render(data);
-          result.newCompletion = [state.textContent, check.hidden, check.textContent];
+          result.newCompletion = [state.textContent, check.hidden, check.textContent,
+            getComputedStyle(check).color];
           check.click();
           data.sessions = [];
           render(data);
           result.dismissed = !document.querySelector('.task');
+
+          const setting = document.querySelector('.read-behavior');
+          result.keepDefault = setting.value;
+          setting.value = 'hide';
+          setting.dispatchEvent(new Event('change'));
+          result.keepChanges = window.keepChanges;
+          document.querySelector('.controls > button').click();
+          document.querySelector('.copy-screenshot').click();
+          result.copies = window.copies;
 
           const fixture = document.createElement('div');
           document.body.append(fixture);
@@ -164,13 +207,26 @@ class FrontendRegressionTest(unittest.TestCase):
         self.assertEqual((result["plusLabel"], result["plusRemaining"]), ("5 小时", "100"))
         self.assertEqual(result["claudeSource"], "Claude Code")
         self.assertTrue(result["tun"])
+        self.assertEqual(result["tunStyle"][0:2], ["none", "none"])
+        self.assertIn("radial-gradient", result["tunStyle"][2])
+        self.assertEqual(result["tunPending"], [False, True, False, "none"])
+        self.assertFalse(result["tunDuringRefresh"])
+        self.assertEqual(result["tunRollback"], [True, False])
+        self.assertEqual(result["tunSuccess"], [False, False])
         self.assertTrue(result["readVisible"])
-        self.assertEqual(result["idle"], ["待命", False, "×", "移除待命条目"])
-        self.assertEqual(result["read"], ["已读", False, True, "✓", "移除已读条目"])
+        self.assertEqual(result["idleStateColor"], "rgb(244, 155, 204)")
+        self.assertEqual(result["readStateColor"], "rgb(179, 188, 198)")
+        self.assertEqual(result["question"], ["待回复", "是否继续？", True, "question-pulse"])
+        self.assertEqual(result["runningAnimation"], "none")
+        self.assertEqual(result["idle"], ["待命", False, "×", "移除待命条目", "rgb(244, 155, 204)"])
+        self.assertEqual(result["read"], ["已读", False, True, "✓", "移除已读条目", "rgb(179, 188, 198)"])
         self.assertEqual(result["newTurn"], ["执行", True, True])
-        self.assertEqual(result["newCompletion"], ["待命", False, "×"])
+        self.assertEqual(result["newCompletion"], ["待命", False, "×", "rgb(244, 155, 204)"])
         self.assertEqual(result["marked"], [["scnet", "two", 1234], ["claude", "claude", 4322]])
         self.assertTrue(result["dismissed"])
+        self.assertEqual(result["keepDefault"], "keep")
+        self.assertEqual(result["keepChanges"], [False])
+        self.assertEqual(result["copies"], [[True, "false"]])
         self.assertEqual(result["navigation"], [[False, None], [False, None], [True, "unique"], [True, "wanted"]])
         page.deleteLater()
         self.app.processEvents()

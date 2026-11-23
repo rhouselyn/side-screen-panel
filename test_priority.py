@@ -377,6 +377,14 @@ class PriorityRegressionTest(unittest.TestCase):
             path.write_text(json.dumps({"type": "message", "message": {
                 "role": "assistant", "stopReason": "stop", "content": []}}) + "\n")
             self.assertEqual(dashboard.scnet_progress(path)[0], "idle")
+            path.write_text(json.dumps({"type": "message", "message": {
+                "role": "assistant", "stopReason": "toolUse",
+                "content": [{"type": "toolCall", "name": "AskUserQuestion"}]}}) + "\n")
+            self.assertEqual(dashboard.scnet_progress(path)[0], "interactive")
+            with path.open("a") as stream:
+                stream.write(json.dumps({"type": "message", "message": {
+                    "role": "toolResult", "content": []}}) + "\n")
+            self.assertEqual(dashboard.scnet_progress(path)[0], "executing")
 
     def test_codex_interruption_survives_ten_minutes_and_can_be_acknowledged(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"USERPROFILE": temp}), \

@@ -31,8 +31,12 @@ class ClaudeCodeTest(unittest.TestCase):
                 [item] = claude_code.sessions({})
                 self.assertEqual((item["name"], item["path"], item["status"], item["step"]),
                                  ("Fixture cleanup", temp, "executing", "执行: Bash"))
-                append("assistant", [{"type": "tool_use", "name": "AskUserQuestion"}])
-                self.assertEqual(claude_code.sessions({})[0]["status"], "interactive")
+                append("assistant", [{"type": "tool_use", "name": "AskUserQuestion",
+                                      "input": {"questions": [{"question": "Which fixture?"}]}}])
+                [question] = claude_code.sessions({})
+                self.assertEqual((question["status"], question["step"]), ("interactive", "Which fixture?"))
+                append("user", [{"type": "tool_result", "content": "First fixture"}])
+                self.assertEqual(claude_code.sessions({})[0]["status"], "executing")
                 append("assistant", [{"type": "text", "text": "Finished the cleanup."}], "end_turn")
                 [item] = claude_code.sessions({})
                 self.assertEqual(item["status"], "idle")
