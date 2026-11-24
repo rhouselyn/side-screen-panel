@@ -18,7 +18,7 @@ import panel_watchdog
 
 class AuditRegressionTest(unittest.TestCase):
     def main_callback(self, name, **scope):
-        # 隔离测试嵌套回调，避免启动真实置顶窗口或修改用户桌面。
+        # 隔离测试嵌套回调，避免启动真实窗口或修改用户桌面。
         source = ast.parse((dashboard.ROOT / "dashboard.py").read_text(encoding="utf-8"))
         main = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "main")
         callback = next(node for node in main.body if isinstance(node, ast.FunctionDef) and node.name == name)
@@ -43,17 +43,80 @@ class AuditRegressionTest(unittest.TestCase):
             self.assertIsNone(dashboard.panel_display([main], main, selected))
 
     def test_show_panel_stays_hidden_when_secondary_is_missing(self):
-        window, topmost = MagicMock(), MagicMock()
+        window, lower = MagicMock(), MagicMock()
         state = {"full_expected": False}
         show = self.main_callback("_show_panel", window=window, state=state,
-                                  place_window=MagicMock(), _force_topmost=topmost)
+                                  place_window=MagicMock(), _lower_panel=lower)
         show()
         window.show.assert_not_called()
-        topmost.assert_not_called()
+        lower.assert_not_called()
         state["full_expected"] = True
         show()
         window.show.assert_called_once()
-        topmost.assert_called_once()
+        lower.assert_called_once()
+
+    def test_panel_uses_bottom_hint_even_with_legacy_topmost_setting(self):
+        source = ast.parse((dashboard.ROOT / "dashboard.py").read_text(encoding="utf-8"))
+        main = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        flags = next(node for node in main.body if isinstance(node, ast.Expr)
+                     and isinstance(node.value, ast.Call)
+                     and isinstance(node.value.func, ast.Attribute)
+                     and node.value.func.attr == "setWindowFlags")
+        window = MagicMock()
+        with patch.dict("os.environ", {"PANEL_QT_TOPMOST": "1"}):
+            exec(compile(ast.Module(body=[flags], type_ignores=[]), "dashboard.py", "exec"),
+                 dict(vars(dashboard), window=window))
+        applied = window.setWindowFlags.call_args.args[0]
+        self.assertTrue(applied & dashboard.QtCore.Qt.WindowStaysOnBottomHint)
+        self.assertTrue(applied & dashboard.QtCore.Qt.FramelessWindowHint)
+        self.assertFalse(applied & dashboard.QtCore.Qt.WindowStaysOnTopHint)
+
+    def test_placement_covers_screen_with_static_border_and_inset_renderer(self):
+        window, screen = MagicMock(), MagicMock()
+        screen.geometry.return_value = dashboard.QtCore.QRect(-2304, 900, 2304, 691)
+        window.geometry.return_value = dashboard.QtCore.QRect(0, 0, 100, 100)
+        window.isVisible.return_value = False
+        state = {"full_expected": False}
+        edge_cover = MagicMock()
+        place = self.main_callback("place_window", window=window, state=state, edge_cover=edge_cover,
+            app=MagicMock(), _secondary=lambda: screen, selected_display="selected",
+            _native_fullbleed_drift=lambda: False, _log_event=MagicMock())
+        with patch.dict("os.environ", {"PANEL_FULLBLEED": "0"}):
+            place()
+        edge_cover.setGeometry.assert_called_once_with(screen.geometry())
+        window.setGeometry.assert_called_once_with(screen.geometry().adjusted(1, 1, -1, -1))
+        self.assertTrue(state["full_expected"])
+
+    def test_native_fit_corrects_one_pixel_dpi_rounding_without_raising_window(self):
+        user32 = MagicMock()
+        native = [0, 1800, 2880, 2664]
+        monitor = (1, 1800, 2881, 2664)
+
+        edge_cover = MagicMock()
+        edge_cover.winId.return_value = 456
+
+        def get_rect(hwnd, pointer):
+            rect = ctypes.cast(pointer, ctypes.POINTER(ctypes.wintypes.RECT)).contents
+            rect.left, rect.top, rect.right, rect.bottom = monitor if hwnd == 456 else native
+            return 1
+
+        def monitors(hdc, clip, callback, data):
+            callback(None, None, ctypes.pointer(ctypes.wintypes.RECT(*monitor)), None)
+            return 1
+
+        user32.GetWindowRect.side_effect = get_rect
+        user32.EnumDisplayMonitors.side_effect = monitors
+        window = MagicMock()
+        window.winId.return_value = 123
+        fit = self.main_callback("_native_fullbleed_drift", window=window, edge_cover=edge_cover, _log_event=MagicMock())
+        with patch("dashboard.ctypes.windll.user32", user32):
+            self.assertTrue(fit())
+            user32.SetWindowPos.assert_not_called()
+            self.assertTrue(fit(correct=True))
+            user32.SetWindowPos.assert_called_once_with(123, None, 3, 1802, 2876, 860, 0x0014)
+            native[:] = (3, 1802, 2879, 2662)
+            self.assertFalse(fit(correct=True))
+            self.assertEqual(user32.SetWindowPos.call_count, 1)
 
     def test_failed_screenshot_save_does_not_report_success(self):
         web, tray = MagicMock(), MagicMock()

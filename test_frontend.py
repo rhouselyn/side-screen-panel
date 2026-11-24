@@ -17,6 +17,33 @@ class FrontendRegressionTest(unittest.TestCase):
         os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
+    def test_static_border_covers_edges_leaves_content_open_and_tracks_visibility(self):
+        window = QtWidgets.QWidget()
+        border = dashboard.PanelEdgeCover(window)
+        try:
+            window.setGeometry(-10000, -10000, 96, 96)
+            border.setGeometry(-10002, -10002, 100, 100)
+            window.show()
+            self.app.processEvents()
+            self.assertTrue(border.isVisible())
+            mask = border.mask()
+            for point in ((0, 0), (99, 0), (0, 99), (99, 99)):
+                self.assertTrue(mask.contains(QtCore.QPoint(*point)))
+            self.assertFalse(mask.contains(QtCore.QPoint(50, 50)))
+            self.assertTrue(border.windowFlags() & QtCore.Qt.WindowStaysOnBottomHint)
+            self.assertTrue(border.windowFlags() & QtCore.Qt.WindowTransparentForInput)
+            window.hide()
+            self.assertFalse(border.isVisible())
+            window.show()
+            self.assertTrue(border.isVisible())
+            window.close()
+            self.assertFalse(border.isVisible())
+        finally:
+            window.close()
+            border.close()
+            border.destroy()
+            window.destroy()
+
     def test_render_recovers_missing_gpu_preserves_nodes_and_opens_latest_title(self):
         socket = MagicMock()
         socket.recv.return_value = '{"id":1,"result":{"result":{"value":true}}}'

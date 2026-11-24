@@ -2404,6 +2404,30 @@ class Bridge(QtCore.QObject):
             return False
 
 
+class PanelEdgeCover(QtWidgets.QWidget):
+    """Static, hollow border: hide the wallpaper without a screen-sized renderer."""
+
+    def __init__(self, panel):
+        super().__init__(None, QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint |
+                         QtCore.Qt.WindowStaysOnBottomHint | QtCore.Qt.WindowTransparentForInput)
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+        self.setStyleSheet("background:#0d1217;")
+        panel.installEventFilter(self)
+
+    def resizeEvent(self, event):
+        self.setMask(QtGui.QRegion(self.rect()) -
+                     QtGui.QRegion(self.rect().adjusted(2, 2, -2, -2)))
+        super().resizeEvent(event)
+
+    def eventFilter(self, panel, event):
+        if event.type() == QtCore.QEvent.Show:
+            self.show()
+            self.lower()
+        elif event.type() in (QtCore.QEvent.Hide, QtCore.QEvent.Close):
+            self.hide()
+        return False
+
+
 def main():
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
     app = QtWidgets.QApplication(sys.argv)
@@ -2417,38 +2441,14 @@ def main():
     if not DEEPSEEK_CONFIG.exists():
         DEEPSEEK_CONFIG.write_text('{\n  "api_key": ""\n}\n', encoding="utf-8")  # 填入 DeepSeek API Key 后显示余额
     window = QtWidgets.QMainWindow()
-    # 置顶：面板没有任务栏图标也不在 Alt-Tab 里，一旦被别的窗口埋住就捞不上来。
-    # 但 WindowStaysOnTopHint 在 Windows 上是靠 Qt **反复** SetWindowPos(HWND_TOPMOST) 断言的，
-    # 每次数据刷新都可能顺带来一次整窗 z 序变更 → ScreenXpert 转发层重合成 → 闪两下。
-    # 所以默认不用 Qt 的 flag，改为显示后由 Win32 只设一次 topmost（_force_topmost）。
-    # 设 PANEL_QT_TOPMOST=1 可退回旧行为做对照实验。
-    _qt_topmost = os.environ.get("PANEL_QT_TOPMOST") == "1"
-    _flags = QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint
-    if _qt_topmost:
-        _flags |= QtCore.Qt.WindowStaysOnTopHint
-    window.setWindowFlags(_flags)
+    # 无边框底层窗口：保留看板交互，普通应用始终可以覆盖它。
+    window.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint |
+                          QtCore.Qt.WindowStaysOnBottomHint)
     window.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+    edge_cover = PanelEdgeCover(window)
 
-    def _force_topmost():
-        """把原生窗口设成 TOPMOST，**只设一次**，不参与每帧绘制。
-
-        Qt 的 WindowStaysOnTopHint 会在窗口被激活/重绘时重新断言，副屏每次都要为此
-        重新合成整块画面；直接调一次 SetWindowPos 就没有这个副作用。
-        """
-        if _qt_topmost:
-            return
-        try:
-            user32 = ctypes.windll.user32
-            user32.SetWindowPos.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND,
-                                            ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                            ctypes.c_int, ctypes.c_uint]
-            user32.SetWindowPos.restype = ctypes.c_int
-            HWND_TOPMOST = ctypes.wintypes.HWND(-1)
-            SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
-            user32.SetWindowPos(ctypes.wintypes.HWND(int(window.winId())), HWND_TOPMOST,
-                                0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
-        except Exception:
-            pass
+    def _lower_panel():
+        window.lower()
     web = QtWebEngineWidgets.QWebEngineView()
     # QWebEngineView 默认是白底：副屏（ScreenPad）显示模式切换会重建 D3D 交换链，
     # 重建那一两帧还没来得及合成页面内容，露出的就是整屏白底。
@@ -2616,7 +2616,7 @@ def main():
 
     display_menu.aboutToShow.connect(_list_displays)
 
-    def _native_fullbleed_drift():
+    def _native_fullbleed_drift(correct=False):
         """用物理像素校验窗口是否真的铺满所在显示器，没铺满返回 True。
 
         Qt5 混合 DPI（两块屏缩放比不同）下，窗口存活期间的 DPI 变化会走
@@ -2649,13 +2649,28 @@ def main():
                         if m[0] <= cx < m[2] and m[1] <= cy < m[3]), None)
             if mon is None:
                 return False
-            if os.environ.get("PANEL_FULLBLEED") == "1":
-                expect = mon
-            else:
-                expect = (mon[0] + 1, mon[1] + 1, mon[2] - 1, mon[3] - 1)
+            # 动态渲染面比屏幕小；边缘由不刷新数据的静态空心窗口填满。
+            expect = (mon[0] + 2, mon[1] + 2, mon[2] - 2, mon[3] - 2)
             native = (rc.left, rc.top, rc.right, rc.bottom)
-            if any(abs(n - e) > 2 for n, e in zip(native, expect)):
+            if correct:
+                user32.SetWindowPos.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND,
+                    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+                user32.SetWindowPos.restype = ctypes.wintypes.BOOL
+                border_rect = ctypes.wintypes.RECT()
+                border_hwnd = int(edge_cover.winId())
+                if user32.GetWindowRect(border_hwnd, ctypes.byref(border_rect)):
+                    border_native = (border_rect.left, border_rect.top, border_rect.right, border_rect.bottom)
+                    if border_native != mon:
+                        user32.SetWindowPos(border_hwnd, None, mon[0], mon[1],
+                                            mon[2] - mon[0], mon[3] - mon[1], 0x0014)
+            if native != expect:
                 _log_event("NATIVE drift native=%s expect=%s" % (native, expect))
+                if correct:
+                    # 用物理像素保留防闪边距，避免混合 DPI 取整后再次恰好全屏。
+                    if not user32.SetWindowPos(int(window.winId()), None,
+                            expect[0], expect[1], expect[2] - expect[0], expect[3] - expect[1],
+                            0x0004 | 0x0010):  # SWP_NOZORDER | SWP_NOACTIVATE
+                        _log_event("NATIVE fit failed")
                 return True
             return False
         except Exception:
@@ -2676,13 +2691,8 @@ def main():
             return
         if selected_display is None:
             _save_display(display_identity(target))
-        g = target.geometry()
-        # **不要和输出尺寸完全一致**。窗口像素级铺满整块屏会满足 DWM 的 direct-flip
-        # 全屏优化条件：之后每次内容更新都要退出再重新进入该模式，副屏就会「连闪两下」。
-        # 这也解释了"把别的界面放上去就不闪"——它们铺不满整屏，压根不走这条路。
-        # 四边各留 1px 就能破坏条件，深色壁纸下肉眼看不出来。PANEL_FULLBLEED=1 可恢复铺满。
-        if os.environ.get("PANEL_FULLBLEED") != "1":
-            g = g.adjusted(1, 1, -1, -1)
+        edge_cover.setGeometry(target.geometry())
+        g = target.geometry().adjusted(1, 1, -1, -1)
         _log_event("PLACE screens=%d primary=%s target=%s" % (
             len(screens),
             tuple(primary.geometry().getRect()) if primary else None,
@@ -2690,11 +2700,8 @@ def main():
         state["full_expected"] = True
         if window.geometry() != g:
             window.setGeometry(g)
-        # 摆放本身也可能被 Qt5 的 DPI 切换路径带偏（实测窗口在主副屏间搬动后
-        # 回副屏，一次 setGeometry 会落成 1799x539，再摆一次才对）。
-        # 显示后再校验一次，偏了就立刻重摆。
-        if window.isVisible() and _native_fullbleed_drift():
-            window.setGeometry(g)
+        if window.isVisible():
+            _native_fullbleed_drift(correct=True)
 
     def _show_panel():
         # 托盘“显示看板”/双击：先归位再显示。直接 show() 会把窗口留在它被搬到的位置
@@ -2703,7 +2710,8 @@ def main():
         place_window()
         if state["full_expected"]:
             window.show()
-            _force_topmost()
+            _lower_panel()
+            place_window()
 
     def _ensure_on_screen():
         # 兜底处理没有发出 Qt 显示事件的 ScreenPad 恢复。
@@ -2747,7 +2755,7 @@ def main():
             place_window()
             if not window.isVisible() and not getattr(window, "_user_hidden", False):
                 window.show()          # 副屏回来了，把因掉线而隐藏的面板显示出来
-                _force_topmost()
+                _lower_panel()
                 # 显示后立刻再校验一次：唤醒/掉线恢复路径上 Qt 处理 DPI 变化
                 # 会把尺寸改坏（见 _native_fullbleed_drift），这时窗口才可见、
                 # 物理校验才跑得起来，1 秒级自愈而不是等 20 秒守护。
