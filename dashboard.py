@@ -23,6 +23,7 @@ import psutil
 import pythoncom
 import requests
 import win32api
+import win32gui
 import yaml
 import win32com.client
 import claude_code
@@ -2405,24 +2406,99 @@ class Bridge(QtCore.QObject):
 
 
 class PanelEdgeCover(QtWidgets.QWidget):
-    """Static, hollow border: hide the wallpaper without a screen-sized renderer."""
+    """Static desktop backdrop behind the smaller dynamic renderer."""
 
     def __init__(self, panel):
         super().__init__(None, QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint |
-                         QtCore.Qt.WindowStaysOnBottomHint | QtCore.Qt.WindowTransparentForInput)
+                         QtCore.Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+        # WS_EX_TRANSPARENT prevents this layered child from painting under Progman.
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
         self.setStyleSheet("background:#0d1217;")
+        # Keep Qt's native layered surface enabled; attach restores alpha to fully opaque.
+        self.setWindowOpacity(254 / 255)
         panel.installEventFilter(self)
+        self._panel = panel
+        self._desktop_parent = 0
+        self._desktop_attached = False
+        self._desktop_timer = QtCore.QTimer(self)
+        self._desktop_timer.setInterval(1000)
+        self._desktop_timer.timeout.connect(self._keep_desktop_visible)
+        self._desktop_timer.start()
+
+    def _keep_desktop_visible(self):
+        panel = self._panel
+        try:
+            handles = (int(self.winId()), int(panel.winId()))
+            if self._desktop_attached and not all(win32gui.IsWindow(hwnd) for hwnd in handles):
+                # Explorer destroyed its child surfaces; the watchdog recreates the renderer.
+                QtWidgets.QApplication.quit()
+                return
+            if getattr(panel, "_user_hidden", False) or not panel.isVisible():
+                return
+            desktop = win32gui.FindWindow("Progman", None)
+            if not desktop:
+                return
+            if not win32gui.FindWindowEx(desktop, 0, "SHELLDLL_DefView", None):
+                hosts = []
+                def find_host(hwnd, _):
+                    if win32gui.FindWindowEx(hwnd, 0, "SHELLDLL_DefView", None):
+                        hosts.append(hwnd)
+                win32gui.EnumWindows(find_host, None)
+                if not hosts:
+                    return
+                desktop = hosts[0]
+            for hwnd in handles:
+                if win32gui.GetParent(hwnd) == desktop:
+                    # Qt's first show can clear the native layered flag after SetParent.
+                    exstyle = win32gui.GetWindowLong(hwnd, -20)
+                    if not exstyle & 0x00080000:
+                        win32gui.SetWindowLong(hwnd, -20, exstyle | 0x00080000)
+                        win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
+                        if hwnd == int(self.winId()):
+                            self.update()
+                    elif win32gui.GetLayeredWindowAttributes(hwnd)[1] != 255:
+                        win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
+                    continue
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                style = win32gui.GetWindowLong(hwnd, -16)
+                win32gui.SetWindowLong(hwnd, -16, (style & ~0x80000000) | 0x40000000)
+                exstyle = win32gui.GetWindowLong(hwnd, -20)
+                win32gui.SetWindowLong(hwnd, -20, (exstyle & ~0x0008) | 0x00080000)
+                # Fully opaque layered children are required by Windows 11's raised desktop.
+                win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, 2)
+                win32gui.SetParent(hwnd, desktop)
+                x, y = win32gui.ScreenToClient(desktop, (left, top))
+                win32gui.SetWindowPos(hwnd, 0, x, y, right - left, bottom - top, 0x0030)
+                if hwnd == int(self.winId()):
+                    self.update()
+            # A rectangular background is reliable under the raised desktop; keep
+            # it behind the renderer instead of relying on a hollow layered region.
+            if win32gui.GetWindow(handles[1], 2) != handles[0]:
+                win32gui.SetWindowPos(handles[0], handles[1], 0, 0, 0, 0, 0x0013)
+            self._desktop_parent = desktop
+            self._desktop_attached = True
+        except win32gui.error:
+            # Explorer may be rebuilding its desktop windows during a display change.
+            pass
 
     def resizeEvent(self, event):
-        self.setMask(QtGui.QRegion(self.rect()) -
-                     QtGui.QRegion(self.rect().adjusted(2, 2, -2, -2)))
         super().resizeEvent(event)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), QtGui.QColor("#0d1217"))
+
+    def nativeEvent(self, event_type, message):
+        msg = ctypes.wintypes.MSG.from_address(int(message))
+        if msg.message == 0x0084:  # WM_NCHITTEST: pass edge clicks through without WS_EX_TRANSPARENT.
+            return True, -1
+        return super().nativeEvent(event_type, message)
 
     def eventFilter(self, panel, event):
         if event.type() == QtCore.QEvent.Show:
             self.show()
-            self.lower()
+            self._keep_desktop_visible()
         elif event.type() in (QtCore.QEvent.Hide, QtCore.QEvent.Close):
             self.hide()
         return False
@@ -2442,13 +2518,15 @@ def main():
         DEEPSEEK_CONFIG.write_text('{\n  "api_key": ""\n}\n', encoding="utf-8")  # 填入 DeepSeek API Key 后显示余额
     window = QtWidgets.QMainWindow()
     # 无边框底层窗口：保留看板交互，普通应用始终可以覆盖它。
-    window.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint |
-                          QtCore.Qt.WindowStaysOnBottomHint)
+    window.setWindowFlags(QtCore.Qt.Tool | QtCore.Qt.FramelessWindowHint)
     window.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+    # Fill screen edges with the main window's static background while keeping
+    # the WebEngine render surface smaller than the physical display.
+    window.setContentsMargins(2, 2, 2, 2)
     edge_cover = PanelEdgeCover(window)
 
     def _lower_panel():
-        window.lower()
+        edge_cover._keep_desktop_visible()
     web = QtWebEngineWidgets.QWebEngineView()
     # QWebEngineView 默认是白底：副屏（ScreenPad）显示模式切换会重建 D3D 交换链，
     # 重建那一两帧还没来得及合成页面内容，露出的就是整屏白底。
@@ -2649,8 +2727,8 @@ def main():
                         if m[0] <= cx < m[2] and m[1] <= cy < m[3]), None)
             if mon is None:
                 return False
-            # 动态渲染面比屏幕小；边缘由不刷新数据的静态空心窗口填满。
-            expect = (mon[0] + 2, mon[1] + 2, mon[2] - 2, mon[3] - 2)
+            # 主窗口铺满屏幕；WebEngine 通过 contentsMargins 保留内部防闪边距。
+            expect = mon
             native = (rc.left, rc.top, rc.right, rc.bottom)
             if correct:
                 user32.SetWindowPos.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND,
@@ -2658,17 +2736,20 @@ def main():
                 user32.SetWindowPos.restype = ctypes.wintypes.BOOL
                 border_rect = ctypes.wintypes.RECT()
                 border_hwnd = int(edge_cover.winId())
+                origin = (mon[0], mon[1])
+                if edge_cover._desktop_parent:
+                    origin = win32gui.ScreenToClient(edge_cover._desktop_parent, origin)
                 if user32.GetWindowRect(border_hwnd, ctypes.byref(border_rect)):
                     border_native = (border_rect.left, border_rect.top, border_rect.right, border_rect.bottom)
                     if border_native != mon:
-                        user32.SetWindowPos(border_hwnd, None, mon[0], mon[1],
+                        user32.SetWindowPos(border_hwnd, None, origin[0], origin[1],
                                             mon[2] - mon[0], mon[3] - mon[1], 0x0014)
             if native != expect:
                 _log_event("NATIVE drift native=%s expect=%s" % (native, expect))
                 if correct:
                     # 用物理像素保留防闪边距，避免混合 DPI 取整后再次恰好全屏。
                     if not user32.SetWindowPos(int(window.winId()), None,
-                            expect[0], expect[1], expect[2] - expect[0], expect[3] - expect[1],
+                            origin[0], origin[1], expect[2] - expect[0], expect[3] - expect[1],
                             0x0004 | 0x0010):  # SWP_NOZORDER | SWP_NOACTIVATE
                         _log_event("NATIVE fit failed")
                 return True
@@ -2692,7 +2773,7 @@ def main():
         if selected_display is None:
             _save_display(display_identity(target))
         edge_cover.setGeometry(target.geometry())
-        g = target.geometry().adjusted(1, 1, -1, -1)
+        g = target.geometry()
         _log_event("PLACE screens=%d primary=%s target=%s" % (
             len(screens),
             tuple(primary.geometry().getRect()) if primary else None,

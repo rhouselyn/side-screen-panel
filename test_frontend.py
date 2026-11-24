@@ -17,27 +17,77 @@ class FrontendRegressionTest(unittest.TestCase):
         os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
         cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
-    def test_static_border_covers_edges_leaves_content_open_and_tracks_visibility(self):
+    def test_static_backdrop_covers_entire_screen_and_tracks_visibility(self):
         window = QtWidgets.QWidget()
         border = dashboard.PanelEdgeCover(window)
+        border._desktop_timer.stop()
+        window._user_hidden = True
         try:
             window.setGeometry(-10000, -10000, 96, 96)
             border.setGeometry(-10002, -10002, 100, 100)
             window.show()
             self.app.processEvents()
             self.assertTrue(border.isVisible())
-            mask = border.mask()
+            self.assertTrue(border.mask().isEmpty(), "Backdrop must not depend on a hollow layered region")
+            image = border.grab().toImage()
             for point in ((0, 0), (99, 0), (0, 99), (99, 99)):
-                self.assertTrue(mask.contains(QtCore.QPoint(*point)))
-            self.assertFalse(mask.contains(QtCore.QPoint(50, 50)))
-            self.assertTrue(border.windowFlags() & QtCore.Qt.WindowStaysOnBottomHint)
-            self.assertTrue(border.windowFlags() & QtCore.Qt.WindowTransparentForInput)
+                self.assertEqual(image.pixelColor(*point).name(), "#0d1217")
+            self.assertFalse(border.windowFlags() & QtCore.Qt.WindowStaysOnBottomHint)
+            self.assertFalse(border.windowFlags() & QtCore.Qt.WindowTransparentForInput)
+            self.assertTrue(border.windowFlags() & QtCore.Qt.WindowDoesNotAcceptFocus)
+            self.assertTrue(border.testAttribute(QtCore.Qt.WA_TransparentForMouseEvents))
             window.hide()
             self.assertFalse(border.isVisible())
             window.show()
             self.assertTrue(border.isVisible())
             window.close()
             self.assertFalse(border.isVisible())
+        finally:
+            window.close()
+            border.close()
+            border.destroy()
+            window.destroy()
+
+    def test_renderer_and_border_are_desktop_children_without_topmost_or_repeated_moves(self):
+        window = QtWidgets.QWidget()
+        border = dashboard.PanelEdgeCover(window)
+        border._desktop_timer.stop()
+        try:
+            parents = {}
+            with patch.object(window, "isVisible", return_value=True), \
+                 patch("dashboard.win32gui.FindWindow", return_value=999), \
+                 patch("dashboard.win32gui.FindWindowEx", return_value=888), \
+                 patch("dashboard.win32gui.IsWindow", return_value=True), \
+                 patch("dashboard.win32gui.GetParent", side_effect=lambda h: parents.get(h, 0)), \
+                 patch("dashboard.win32gui.GetWindow", return_value=int(border.winId())), \
+                 patch("dashboard.win32gui.GetWindowRect", return_value=(10, 20, 110, 120)), \
+                 patch("dashboard.win32gui.GetWindowLong", return_value=0x80000008), \
+                 patch("dashboard.win32gui.SetWindowLong") as style, \
+                 patch("dashboard.win32gui.SetLayeredWindowAttributes") as alpha, \
+                 patch("dashboard.win32gui.SetParent", side_effect=lambda h, p: parents.update({h: p})) as parent, \
+                 patch("dashboard.win32gui.ScreenToClient", return_value=(5, 15)), \
+                 patch("dashboard.win32gui.SetWindowPos") as position:
+                border._keep_desktop_visible()
+                self.assertEqual(parent.call_count, 2)
+                self.assertEqual(border._desktop_parent, 999)
+                self.assertTrue(border._desktop_attached)
+                for call in style.call_args_list:
+                    if call.args[1] == -16:
+                        self.assertTrue(call.args[2] & 0x40000000)
+                        self.assertFalse(call.args[2] & 0x80000000)
+                    else:
+                        self.assertFalse(call.args[2] & 8)
+                self.assertTrue(all(call.args[2] == 255 for call in alpha.call_args_list))
+                self.assertTrue(all(call.args[1] != -1 for call in position.call_args_list))
+                parent.reset_mock()
+                position.reset_mock()
+                border._keep_desktop_visible()
+                parent.assert_not_called()
+                position.assert_not_called()
+                parents.clear()
+                window._user_hidden = True
+                border._keep_desktop_visible()
+                parent.assert_not_called()
         finally:
             window.close()
             border.close()

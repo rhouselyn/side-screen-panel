@@ -55,7 +55,7 @@ class AuditRegressionTest(unittest.TestCase):
         window.show.assert_called_once()
         lower.assert_called_once()
 
-    def test_panel_uses_bottom_hint_even_with_legacy_topmost_setting(self):
+    def test_panel_leaves_native_z_order_control_to_desktop_guard(self):
         source = ast.parse((dashboard.ROOT / "dashboard.py").read_text(encoding="utf-8"))
         main = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "main")
         flags = next(node for node in main.body if isinstance(node, ast.Expr)
@@ -67,7 +67,7 @@ class AuditRegressionTest(unittest.TestCase):
             exec(compile(ast.Module(body=[flags], type_ignores=[]), "dashboard.py", "exec"),
                  dict(vars(dashboard), window=window))
         applied = window.setWindowFlags.call_args.args[0]
-        self.assertTrue(applied & dashboard.QtCore.Qt.WindowStaysOnBottomHint)
+        self.assertFalse(applied & dashboard.QtCore.Qt.WindowStaysOnBottomHint)
         self.assertTrue(applied & dashboard.QtCore.Qt.FramelessWindowHint)
         self.assertFalse(applied & dashboard.QtCore.Qt.WindowStaysOnTopHint)
 
@@ -84,7 +84,7 @@ class AuditRegressionTest(unittest.TestCase):
         with patch.dict("os.environ", {"PANEL_FULLBLEED": "0"}):
             place()
         edge_cover.setGeometry.assert_called_once_with(screen.geometry())
-        window.setGeometry.assert_called_once_with(screen.geometry().adjusted(1, 1, -1, -1))
+        window.setGeometry.assert_called_once_with(screen.geometry())
         self.assertTrue(state["full_expected"])
 
     def test_native_fit_corrects_one_pixel_dpi_rounding_without_raising_window(self):
@@ -94,6 +94,7 @@ class AuditRegressionTest(unittest.TestCase):
 
         edge_cover = MagicMock()
         edge_cover.winId.return_value = 456
+        edge_cover._desktop_parent = 0
 
         def get_rect(hwnd, pointer):
             rect = ctypes.cast(pointer, ctypes.POINTER(ctypes.wintypes.RECT)).contents
@@ -113,8 +114,8 @@ class AuditRegressionTest(unittest.TestCase):
             self.assertTrue(fit())
             user32.SetWindowPos.assert_not_called()
             self.assertTrue(fit(correct=True))
-            user32.SetWindowPos.assert_called_once_with(123, None, 3, 1802, 2876, 860, 0x0014)
-            native[:] = (3, 1802, 2879, 2662)
+            user32.SetWindowPos.assert_called_once_with(123, None, 1, 1800, 2880, 864, 0x0014)
+            native[:] = monitor
             self.assertFalse(fit(correct=True))
             self.assertEqual(user32.SetWindowPos.call_count, 1)
 
